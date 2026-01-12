@@ -1,0 +1,129 @@
+---
+# Hammerspace Integration Role - Register node, volumes, and shares via API
+# Based on https://github.com/hammer-space/ansible
+
+- name: Validate Hammerspace API configuration
+  ansible.builtin.assert:
+    that:
+      - hammerspace_api_host is defined
+      - hammerspace_api_user is defined
+      - hammerspace_api_password is defined
+    fail_msg: "Hammerspace API configuration missing. Set hammerspace_api_host, hammerspace_api_user, hammerspace_api_password"
+
+- name: Set API base URL
+  ansible.builtin.set_fact:
+    hs_api_url: "https://{{ hammerspace_api_host }}:8443/mgmt/v1.2/rest"
+
+# =============================================================================
+# Add Storage System (Node)
+# =============================================================================
+
+- name: Set node name and IP
+  ansible.builtin.set_fact:
+    hs_node_name: "{{ hammerspace_node_name | default(inventory_hostname) }}"
+    hs_node_ip: "{{ hammerspace_node_ip | default(ansible_default_ipv4.address) }}"
+
+- name: Build storage system payload
+  ansible.builtin.set_fact:
+    storage_system_payload:
+      name: "{{ hs_node_name }}"
+      nodeType: "OTHER"
+      mgmtIpAddress:
+        address: "{{ hs_node_ip }}"
+      _type: "NODE"
+
+- name: Check if storage system already exists
+  ansible.builtin.uri:
+    url: "{{ hs_api_url }}/nodes/{{ hs_node_name | urlencode }}"
+    user: "{{ hammerspace_api_user }}"
+    password: "{{ hammerspace_api_password }}"
+    method: GET
+    force_basic_auth: true
+    status_code: [200, 404]
+    validate_certs: "{{ hammerspace_api_validate_certs | default(false) }}"
+    timeout: 60
+  register: node_check
+  failed_when: false
+
+- name: Add storage system to Hammerspace cluster
+  ansible.builtin.uri:
+    url: "{{ hs_api_url }}/nodes?ip={{ hs_node_ip }}"
+    user: "{{ hammerspace_api_user }}"
+    password: "{{ hammerspace_api_password }}"
+    method: POST
+    body: "{{ storage_system_payload }}"
+    body_format: json
+    force_basic_auth: true
+    status_code: 202
+    validate_certs: "{{ hammerspace_api_validate_certs | default(false) }}"
+    timeout: 180
+  register: node_add_result
+  when: node_check.status | default(404) == 404
+
+- name: Wait for storage system add to complete
+  ansible.builtin.uri:
+    url: "{{ node_add_result.location }}"
+    user: "{{ hammerspace_api_user }}"
+    password: "{{ hammerspace_api_password }}"
+    method: GET
+    force_basic_auth: true
+    status_code: 200
+    validate_certs: "{{ hammerspace_api_validate_certs | default(false) }}"
+  register: node_add_status
+  until: node_add_status.json.status == "COMPLETED"
+  retries: 30
+  delay: 10
+  when: node_add_result.location is defined
+
+- name: Display storage system status
+  ansible.builtin.debug:
+    msg: >-
+      Storage system '{{ hs_node_name }}' ({{ hs_node_ip }})
+      {% if node_check.status | default(0) == 200 %}already exists{% else %}added successfully{% endif %}
+
+# =============================================================================
+# Add Storage Volumes
+# =============================================================================
+
+- name: Add storage volumes to Hammerspace
+  ansible.builtin.include_tasks: add_volume.yml
+  loop: "{{ mount_points }}"
+  loop_control:
+    loop_var: volume_config
+    label: "{{ volume_config.path }}"
+  when: hammerspace_add_volumes | default(true)
+
+# =============================================================================
+# Create Shares (Optional)
+# =============================================================================
+
+- name: Create Hammerspace shares
+  ansible.builtin.include_tasks: create_share.yml
+  loop: "{{ hammerspace_shares | default([]) }}"
+  loop_control:
+    loop_var: share_config
+    label: "{{ share_config.name }}"
+  when:
+    - hammerspace_create_shares | default(false)
+    - hammerspace_shares is defined
+    - hammerspace_shares | length > 0
+
+# =============================================================================
+# Summary
+# =============================================================================
+
+- name: Display Hammerspace integration summary
+  ansible.builtin.debug:
+    msg: |
+      ============================================
+      HAMMERSPACE INTEGRATION COMPLETE
+      ============================================
+      Anvil API: {{ hammerspace_api_host }}
+      Storage System: {{ hs_node_name }}
+      Node IP: {{ hs_node_ip }}
+      Volumes Added: {{ mount_points | length }}
+
+      Verify in Hammerspace GUI or CLI:
+        anvil> node-list
+        anvil> storage-volume-list
+      ============================================

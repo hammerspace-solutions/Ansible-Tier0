@@ -1,0 +1,86 @@
+---
+# Main playbook for Hammerspace Tier 0 / LSS storage and NFS setup
+# Based on Hammerspace Tier 0 Deployment Guide v1.0
+# Usage: ansible-playbook -i inventory.yml site.yml
+
+- name: Configure Storage and NFS for Hammerspace Tier 0 / LSS
+  hosts: storage_servers
+  become: true
+  gather_facts: true
+
+  vars_files:
+    - vars/main.yml
+
+  pre_tasks:
+    - name: Verify we have the required variables (skip if using dynamic discovery)
+      ansible.builtin.assert:
+        that:
+          - raid_arrays is defined or individual_drives is defined or use_dynamic_discovery | default(false)
+          - nfs_exports is defined or use_dynamic_discovery | default(false)
+        fail_msg: "Required variables are not defined. Check vars/main.yml or enable use_dynamic_discovery"
+
+  roles:
+    # Dynamic NVMe discovery - groups drives by NUMA and excludes boot device
+    - role: nvme_discovery
+      when: use_dynamic_discovery | default(false)
+      tags: [discovery, nvme]
+
+    - role: precheck
+      tags: [precheck, validation]
+
+    - role: raid_setup
+      when: use_raid | default(true)
+      tags: [raid, storage]
+
+    - role: filesystem_setup
+      tags: [filesystem, storage]
+
+    - role: nfs_setup
+      tags: [nfs]
+
+    - role: firewall_setup
+      tags: [firewall]
+
+    # Hammerspace cluster integration via API
+    - role: hammerspace_integration
+      when: hammerspace_api_host is defined
+      tags: [hammerspace, integration]
+
+  post_tasks:
+    - name: Run systemctl daemon-reload after fstab changes
+      ansible.builtin.systemd:
+        daemon_reload: true
+
+    - name: Display summary
+      ansible.builtin.debug:
+        msg: |
+          ============================================
+          HAMMERSPACE TIER 0 / LSS SETUP COMPLETE
+          ============================================
+          - RAID arrays configured: {{ raid_arrays | default([]) | length }}
+          - Mount points created: {{ mount_points | length }}
+          - NFS exports configured: {{ nfs_exports | default([]) | length }}
+          {% if hammerspace_api_host is defined %}
+          - Hammerspace integration: ENABLED
+            - Storage system registered: {{ hammerspace_node_name | default(inventory_hostname) }}
+            - Volumes added: {{ mount_points | length }}
+          {% else %}
+          - Hammerspace integration: SKIPPED (set hammerspace_api_host to enable)
+          {% endif %}
+
+          VERIFY:
+          1. NFS exports from another node:
+             showmount -e {{ ansible_default_ipv4.address }}
+
+          {% if hammerspace_api_host is defined %}
+          2. Hammerspace CLI:
+             anvil> node-list
+             anvil> storage-volume-list
+          {% else %}
+          2. Manual Hammerspace integration (if not using API):
+             anvil> node-add --type OTHER --name {{ inventory_hostname }} --ip {{ ansible_default_ipv4.address }}
+             {% for mp in mount_points %}
+             anvil> volume-add --name {{ inventory_hostname }}::{{ mp.path }} --node-name {{ inventory_hostname }} --logical-volume-name {{ mp.path }}
+             {% endfor %}
+          {% endif %}
+          ============================================

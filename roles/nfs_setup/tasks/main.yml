@@ -1,0 +1,139 @@
+---
+# NFS setup role - main tasks
+# Configured per Hammerspace Tier 0 Deployment Guide recommendations
+
+- name: Include OS-specific variables
+  ansible.builtin.include_vars: "{{ item }}"
+  with_first_found:
+    - "{{ ansible_distribution | lower }}-{{ ansible_distribution_major_version }}.yml"
+    - "{{ ansible_distribution | lower }}.yml"
+    - "{{ ansible_os_family | lower }}.yml"
+    - "default.yml"
+
+- name: Install NFS server packages
+  ansible.builtin.package:
+    name: "{{ nfs_packages }}"
+    state: present
+
+- name: Check existing NFS configuration
+  ansible.builtin.stat:
+    path: /etc/nfs.conf
+  register: nfs_conf_stat
+
+- name: Backup existing nfs.conf
+  ansible.builtin.copy:
+    src: /etc/nfs.conf
+    dest: /etc/nfs.conf.backup.{{ ansible_date_time.iso8601_basic_short }}
+    remote_src: true
+    mode: '0644'
+  when: nfs_conf_stat.stat.exists
+
+- name: Deploy Hammerspace-recommended nfs.conf
+  ansible.builtin.template:
+    src: nfs.conf.j2
+    dest: /etc/nfs.conf
+    owner: root
+    group: root
+    mode: '0644'
+    backup: true
+  notify:
+    - Restart NFS server
+
+- name: Check for custom NFS configuration directory
+  ansible.builtin.file:
+    path: /etc/nfs.conf.d
+    state: directory
+    mode: '0755'
+
+- name: Check for custom NFS configuration files
+  ansible.builtin.find:
+    paths: /etc/nfs.conf.d
+    patterns: "*.conf"
+  register: nfs_conf_d_files
+
+- name: Display custom NFS configs found
+  ansible.builtin.debug:
+    msg: "Custom NFS configs: {{ nfs_conf_d_files.files | map(attribute='path') | list }}"
+  when: nfs_conf_d_files.files is defined and nfs_conf_d_files.files | length > 0
+
+- name: Read NFS port configuration for verification
+  ansible.builtin.shell: |
+    grep -r "port\|Port" /etc/nfs.conf /etc/nfs.conf.d/ 2>/dev/null || true
+  register: nfs_port_config
+  changed_when: false
+
+- name: Display non-default port configuration if found
+  ansible.builtin.debug:
+    msg: "NFS port configuration found: {{ nfs_port_config.stdout_lines }}"
+  when: nfs_port_config.stdout | length > 0
+
+- name: Backup existing exports file
+  ansible.builtin.copy:
+    src: /etc/exports
+    dest: /etc/exports.backup.{{ ansible_date_time.iso8601_basic_short }}
+    remote_src: true
+    mode: '0644'
+  when: ansible_check_mode is not defined or not ansible_check_mode
+  failed_when: false
+
+- name: Generate /etc/exports from template
+  ansible.builtin.template:
+    src: exports.j2
+    dest: /etc/exports
+    owner: root
+    group: root
+    mode: '0644'
+    backup: true
+  notify:
+    - Reload NFS exports
+
+- name: Enable rpcbind service
+  ansible.builtin.systemd:
+    name: rpcbind
+    enabled: true
+    state: started
+
+- name: Enable NFS server service
+  ansible.builtin.systemd:
+    name: "{{ nfs_service }}"
+    enabled: true
+    state: started
+
+- name: Export NFS shares
+  ansible.builtin.command: exportfs -ra
+  changed_when: true
+
+- name: Verify NFS exports
+  ansible.builtin.command: exportfs -v
+  register: exportfs_output
+  changed_when: false
+
+- name: Display active NFS exports
+  ansible.builtin.debug:
+    var: exportfs_output.stdout_lines
+
+- name: Check showmount functionality
+  ansible.builtin.command: showmount -e localhost
+  register: showmount_output
+  changed_when: false
+  failed_when: false
+
+- name: Display showmount output
+  ansible.builtin.debug:
+    var: showmount_output.stdout_lines
+  when: showmount_output.rc == 0
+
+- name: Warn if showmount is disabled
+  ansible.builtin.debug:
+    msg: "WARNING: showmount appears to be disabled or not working - ensure it is not disabled in your configuration"
+  when: showmount_output.rc != 0
+
+- name: Get RPC info for verification
+  ansible.builtin.command: rpcinfo -p
+  register: rpcinfo_output
+  changed_when: false
+  failed_when: false
+
+- name: Display RPC services
+  ansible.builtin.debug:
+    var: rpcinfo_output.stdout_lines

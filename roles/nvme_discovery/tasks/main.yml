@@ -1,0 +1,184 @@
+---
+# NVMe Discovery Role - Dynamically discover NVMe drives and group by NUMA node
+# Excludes boot drive automatically for safe RAID configuration
+
+- name: Initialize discovery variables
+  ansible.builtin.set_fact:
+    nvme_devices: []
+    numa_nodes: []
+    nvme_by_numa: {}
+    discovered_raid_arrays: []
+    discovered_mount_points: []
+    discovered_nfs_exports: []
+    _hs_clients: []
+    raid_arrays: "{{ raid_arrays | default([]) }}"
+    mount_points: "{{ mount_points | default([]) }}"
+    nfs_exports: "{{ nfs_exports | default([]) }}"
+
+- name: Identify boot device (device containing root filesystem)
+  ansible.builtin.shell: |
+    lsblk -no PKNAME "$(findmnt -n -o SOURCE /)" 2>/dev/null | head -1
+  register: boot_device_raw
+  changed_when: false
+
+- name: Set boot device fact
+  ansible.builtin.set_fact:
+    boot_device: "{{ boot_device_raw.stdout | default('') | trim }}"
+
+- name: Display boot device
+  ansible.builtin.debug:
+    msg: "Boot device detected: {{ boot_device }} (will be excluded from RAID)"
+
+- name: Discover all NVMe devices with NUMA node assignments
+  ansible.builtin.shell: |
+    for nvme in /sys/class/nvme/nvme*; do
+      if [ -d "$nvme" ]; then
+        name=$(basename "$nvme")
+        numa=$(cat "$nvme/device/numa_node" 2>/dev/null || echo "-1")
+        # Check if the namespace exists (nvmeXn1)
+        if [ -b "/dev/${name}n1" ]; then
+          echo "${name}:${numa}"
+        fi
+      fi
+    done
+  register: nvme_numa_raw
+  changed_when: false
+
+- name: Build NVMe device list with NUMA info (excluding boot device)
+  ansible.builtin.set_fact:
+    nvme_devices: >-
+      {{
+        nvme_devices | default([]) + [{
+          'name': item.split(':')[0],
+          'device': '/dev/' + item.split(':')[0] + 'n1',
+          'numa': item.split(':')[1] | int
+        }]
+      }}
+  loop: "{{ nvme_numa_raw.stdout_lines | default([]) }}"
+  when:
+    - item | length > 0
+    - item.split(':')[0] != boot_device
+
+- name: Get unique NUMA nodes
+  ansible.builtin.set_fact:
+    numa_nodes: "{{ nvme_devices | map(attribute='numa') | unique | sort | list }}"
+
+- name: Group NVMe devices by NUMA node
+  ansible.builtin.set_fact:
+    nvme_by_numa: >-
+      {{
+        nvme_by_numa | default({}) | combine({
+          item | string: nvme_devices | selectattr('numa', 'equalto', item) | map(attribute='device') | list
+        })
+      }}
+  loop: "{{ numa_nodes }}"
+
+- name: Display discovered NVMe configuration
+  ansible.builtin.debug:
+    msg: |
+      ============================================
+      NVMe DISCOVERY RESULTS
+      ============================================
+      Boot device (excluded): {{ boot_device }}
+      Total NVMe devices found: {{ nvme_devices | length }}
+      NUMA nodes detected: {{ numa_nodes | join(', ') }}
+
+      Devices by NUMA node:
+      {% for numa in numa_nodes %}
+      NUMA {{ numa }}: {{ nvme_by_numa[numa | string] | join(', ') }}
+      {% endfor %}
+      ============================================
+
+- name: Build dynamic RAID arrays grouped by NUMA node
+  ansible.builtin.set_fact:
+    discovered_raid_arrays: >-
+      {{
+        discovered_raid_arrays | default([]) + [{
+          'name': 'md' + (loop_index | string),
+          'device': '/dev/md' + (loop_index | string),
+          'level': raid_level | default(0),
+          'numa_node': item | int,
+          'drives': nvme_by_numa[item | string]
+        }]
+      }}
+  loop: "{{ numa_nodes | map('string') | list }}"
+  loop_control:
+    index_var: loop_index
+  when: nvme_by_numa[item] | length > 0
+
+- name: Build dynamic mount points for discovered arrays
+  ansible.builtin.set_fact:
+    discovered_mount_points: >-
+      {{
+        discovered_mount_points | default([]) + [{
+          'path': mount_base_path | default('/hammerspace') + '/hsvol' + (loop_index | string),
+          'device': item.device,
+          'fstype': 'xfs',
+          'label': 'hsvol' + (loop_index | string),
+          'mount_opts': 'defaults,nofail,discard'
+        }]
+      }}
+  loop: "{{ discovered_raid_arrays }}"
+  loop_control:
+    index_var: loop_index
+
+- name: Override raid_arrays with discovered configuration
+  ansible.builtin.set_fact:
+    raid_arrays: "{{ discovered_raid_arrays }}"
+  when: use_dynamic_discovery | default(true)
+
+- name: Override mount_points with discovered configuration
+  ansible.builtin.set_fact:
+    mount_points: "{{ discovered_mount_points }}"
+  when: use_dynamic_discovery | default(true)
+
+- name: Initialize NFS client list
+  ansible.builtin.set_fact:
+    _hs_clients: []
+
+- name: Add Hammerspace nodes to NFS client list
+  ansible.builtin.set_fact:
+    _hs_clients: "{{ _hs_clients + [{'host': item, 'options': hammerspace_export_opts | default('rw,no_root_squash,sync,secure,mp,no_subtree_check')}] }}"
+  loop: "{{ (hammerspace_nodes | default([])) + (mover_nodes | default([])) }}"
+
+- name: Add client subnets to NFS client list
+  ansible.builtin.set_fact:
+    _hs_clients: "{{ _hs_clients + [{'host': item, 'options': client_export_opts | default('rw,root_squash,sync,secure,mp,no_subtree_check')}] }}"
+  loop: "{{ client_subnets | default([]) }}"
+
+- name: Build dynamic NFS exports for discovered mount points
+  ansible.builtin.set_fact:
+    discovered_nfs_exports: "{{ discovered_nfs_exports | default([]) + [{'path': item.path, 'clients': _hs_clients}] }}"
+  loop: "{{ discovered_mount_points }}"
+  when: use_dynamic_discovery | default(true)
+
+- name: Override nfs_exports with discovered configuration
+  ansible.builtin.set_fact:
+    nfs_exports: "{{ discovered_nfs_exports }}"
+  when:
+    - use_dynamic_discovery | default(true)
+    - discovered_nfs_exports is defined
+    - discovered_nfs_exports | length > 0
+
+- name: Display final RAID configuration
+  ansible.builtin.debug:
+    msg: |
+      ============================================
+      DYNAMIC RAID CONFIGURATION
+      ============================================
+      {% for array in raid_arrays %}
+      {{ array.name }} ({{ array.device }}):
+        NUMA Node: {{ array.numa_node | default('N/A') }}
+        RAID Level: {{ array.level }}
+        Drives ({{ array.drives | length }}): {{ array.drives | join(', ') }}
+      {% endfor %}
+      ============================================
+
+      Mount Points:
+      {% for mp in mount_points %}
+      {{ mp.path }} -> {{ mp.device }} ({{ mp.fstype }})
+      {% endfor %}
+      ============================================
+
+      NFS Exports: {{ nfs_exports | length }} paths configured
+      ============================================

@@ -1,0 +1,49 @@
+---
+# Hammerspace Integration Role - Default Configuration
+
+# API connection settings (override in vars/main.yml)
+# hammerspace_api_host: "10.1.2.3"  # Anvil management IP
+# hammerspace_api_user: "admin"
+# hammerspace_api_password: "password"
+hammerspace_api_validate_certs: false
+
+# Node registration settings
+# hammerspace_node_name: "{{ inventory_hostname }}"  # Override for custom naming
+# hammerspace_node_ip: "{{ ansible_default_ipv4.address }}"
+
+# Volume settings
+hammerspace_add_volumes: true
+
+# Volume threshold settings (per Tier 0 Deployment Guide)
+# High threshold (utilizationThreshold): when to start evacuating data
+# Value is decimal (0.98 = 98%)
+hammerspace_volume_high_threshold: 0.98
+
+# Low threshold (utilizationEvacuationThreshold): target after evacuation
+# Value is decimal (0.90 = 90%)
+hammerspace_volume_low_threshold: 0.90
+
+# Volume protection settings
+# onlineDelay: time in seconds before volume goes suspected (--max-suspected-time)
+hammerspace_volume_online_delay: 0
+
+# unavailableStateAvailabilityMultiplier: controls availability drop behavior
+# Set to 0 to disable availability drop (--availability-drop-disabled)
+# Set to 1 to enable availability drop (--availability-drop-enabled)
+hammerspace_volume_unavailable_multiplier: 1
+
+# availability: target availability level (typically 2)
+hammerspace_volume_availability: 2
+
+# durability: target durability level (typically 3)
+hammerspace_volume_durability: 3
+
+# Share settings
+hammerspace_create_shares: false
+hammerspace_update_existing_shares: false
+
+# Default export options for shares
+default_share_export_options:
+  - subnet: "*"
+    accessPermissions: "RW"
+    rootSquash: false
