@@ -5,8 +5,8 @@
 - [ ] umount protection for the raid volumes and add details to the README document
 - [x] numa node nvme match
 - [ ] keep out the first and last NVMe drives from the raid
-- [ ] server block device read ahead 1MB
-- [ ] client mount point read ahead 1MB
+- [ ] Block Device Read-Ahead
+- [ ] NFS client Read-Ahead
 - [ ] sunrpc module parameter pool_mode = pernode
 - [x] use raid volumes without defining partitions
 - [x] use /hammerspace directory as a root for all volume mount points
@@ -22,3 +22,4 @@
   - [ ] volume naming az${ser}:$hostname:$vol
   - [ ] optional additional-ip-add
   - [ ] optional availability_drop
+- [ ] Tunable Anvil Delete Rate 
