@@ -8,6 +8,7 @@ Tier 0 transforms existing local NVMe storage on GPU servers into ultra-fast, pe
 
 ## Features
 
+### Storage & NFS
 - **Dynamic NVMe Discovery**: Automatically discovers NVMe drives and groups them by NUMA node for optimal performance
 - **Boot Drive Exclusion**: Automatically detects and excludes the boot drive from RAID configuration
 - **Comprehensive Health Checks**: Validates drive count, mount status, NUMA balance, 4K sector size, MTU connectivity, and package availability
@@ -19,8 +20,33 @@ Tier 0 transforms existing local NVMe storage on GPU servers into ultra-fast, pe
 - **NFS Server Configuration**: Deploys `/etc/nfs.conf` with 128 threads, NFSv4.2, and optional RDMA support
 - **Export Management**: Configures exports with proper `no_root_squash` for Hammerspace nodes and `root_squash` for clients
 - **Firewall Setup**: Opens required ports for NFS, including RDMA port 20049
-- **Hammerspace API Integration**: Automatically registers nodes, volumes, and shares via Anvil REST API
+- **iptables Flush**: Automatically flushes iptables rules at playbook start to prevent connectivity issues
+
+### Hammerspace Integration
+- **Node Registration**: Automatically registers storage servers via Anvil REST API
+- **Volume Management**: Adds storage volumes with configurable thresholds and protection settings
+- **Task Queue Throttling**: Prevents API overload by monitoring queued tasks (configurable min/max thresholds)
+- **Volume Groups**: Creates volume groups for organizing volumes by AZ or location
+- **Share Management**: Creates shares with configurable export options
+- **Share Objectives**: Applies availability/durability objectives to shares
+- **AZ Mapping**: Parses availability zone from node names and applies labels
+
+### S3/Object Storage
+- **S3 Node Integration**: Add AWS S3 or S3-compatible storage nodes
+- **Object Storage Volumes**: Add S3 buckets as Hammerspace volumes
+- **S3 Server**: Create internal S3 server for S3 protocol access
+- **S3 Users**: Create and manage S3 users for authentication
+
+### Cluster Configuration
+- **DNS Configuration**: Update cluster DNS servers and search domains
+- **Active Directory**: Join Hammerspace cluster to Active Directory
+- **Site Name**: Configure cluster site name
+- **Physical Location**: Set datacenter, room, rack, and position metadata
+- **Prometheus Monitoring**: Enable Prometheus exporters for metrics collection
+
+### Platform Support
 - **Multi-Distribution Support**: Works on Debian, Ubuntu, RHEL, Rocky Linux, CentOS
+- **Firewall Auto-Detection**: Automatically detects firewalld, UFW, or iptables
 
 ## Directory Structure
 
@@ -38,8 +64,29 @@ ansible-storage-setup/
     ├── raid_setup/              # RAID configuration with mdadm.conf persistence
     ├── filesystem_setup/        # Filesystem creation with UUID-based fstab
     ├── nfs_setup/               # NFS server configuration
-    ├── firewall_setup/          # Firewall configuration
-    └── hammerspace_integration/ # Anvil API integration (node, volumes, shares)
+    ├── firewall_setup/          # Firewall configuration (firewalld/ufw/iptables)
+    └── hammerspace_integration/ # Anvil API integration
+        ├── tasks/
+        │   ├── main.yml             # Main integration orchestration
+        │   ├── add_node.yml         # Register storage node
+        │   ├── add_volume.yml       # Add storage volumes
+        │   ├── create_share.yml     # Create shares
+        │   ├── task_queue_wait.yml  # API throttling
+        │   ├── volume_group_create.yml  # Volume groups
+        │   ├── az_map.yml           # AZ label mapping
+        │   ├── share_apply_objective.yml  # Share objectives
+        │   ├── s3/                  # S3/Object storage tasks
+        │   │   ├── add_s3_node.yml
+        │   │   ├── add_object_storage_volume.yml
+        │   │   ├── create_s3_server.yml
+        │   │   └── create_s3_user.yml
+        │   └── cluster/             # Cluster configuration tasks
+        │       ├── dns_update.yml
+        │       ├── ad_join.yml
+        │       ├── change_site_name.yml
+        │       ├── set_location.yml
+        │       └── prometheus_enable.yml
+        └── defaults/main.yml    # Default variables
 ```
 
 ## Quick Start

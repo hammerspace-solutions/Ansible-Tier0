@@ -7,7 +7,7 @@ all:
     storage_servers:
       hosts:
         tier0-node-01:
-          ansible_host: 10.0.5.125
+          ansible_host: 10.0.14.234
 
       vars:
         # SSH settings

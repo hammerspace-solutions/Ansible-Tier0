@@ -2,6 +2,11 @@
 # Add a storage volume to Hammerspace
 # Called from main.yml with volume_config variable
 
+# Check task queue before adding volume (throttling)
+- name: "Wait for task queue before adding {{ volume_config.path }}"
+  ansible.builtin.include_tasks: task_queue_wait.yml
+  when: hammerspace_task_queue_throttle | default(true)
+
 - name: "Build volume payload for {{ volume_config.path }}"
   ansible.builtin.set_fact:
     volume_payload:
@@ -31,11 +36,23 @@
     password: "{{ hammerspace_api_password }}"
     method: GET
     force_basic_auth: true
-    status_code: [200, 404]
+    status_code: [200, 400, 404]
     validate_certs: "{{ hammerspace_api_validate_certs | default(false) }}"
     timeout: 60
   register: volume_check
   failed_when: false
+
+- name: "Debug volume check result"
+  ansible.builtin.debug:
+    msg: |
+      Volume check for '{{ volume_payload.name }}':
+      Status: {{ volume_check.status | default('undefined') }}
+      URL: {{ hs_api_url }}/storage-volumes/{{ volume_payload.name | urlencode }}
+  when: hammerspace_debug | default(false)
+
+- name: "Set volume exists flag"
+  ansible.builtin.set_fact:
+    volume_already_exists: "{{ volume_check.status == 200 }}"
 
 - name: "Add storage volume {{ volume_config.path }}"
   ansible.builtin.uri:
@@ -46,11 +63,19 @@
     body: "{{ volume_payload }}"
     body_format: json
     force_basic_auth: true
-    status_code: 202
+    status_code: [202, 400]
     validate_certs: "{{ hammerspace_api_validate_certs | default(false) }}"
     timeout: 180
   register: volume_add_result
-  when: volume_check.status == 404
+  when: not volume_already_exists
+
+- name: "Check if add failed due to volume already existing"
+  ansible.builtin.set_fact:
+    volume_already_exists: true
+  when:
+    - volume_add_result is defined
+    - volume_add_result.status | default(0) == 400
+    - "'already exists' in (volume_add_result.json | default([]) | string)"
 
 - name: "Wait for volume {{ volume_config.path }} add to complete"
   ansible.builtin.uri:
@@ -65,10 +90,12 @@
   until: volume_add_status.json.status == "COMPLETED"
   retries: 20
   delay: 5
-  when: volume_add_result.location is defined
+  when:
+    - not volume_already_exists
+    - volume_add_result.location is defined
 
 - name: "Display volume {{ volume_config.path }} status"
   ansible.builtin.debug:
     msg: >-
       Volume '{{ volume_payload.name }}'
-      {% if volume_check.status == 200 %}already exists{% else %}added successfully{% endif %}
+      {% if volume_already_exists %}already exists (skipped){% else %}added successfully{% endif %}

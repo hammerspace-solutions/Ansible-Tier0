@@ -1,6 +1,11 @@
 ---
 # Default variables for firewall_setup role
 
+# Whether to flush iptables before configuring
+# Set to true to clear existing rules and start fresh
+# This ensures NFS rules are not blocked by existing REJECT rules
+flush_iptables: true
+
 # Whether to enable UFW (only affects Debian/Ubuntu)
 # Set to true with caution - ensure SSH is allowed first!
 enable_ufw: false

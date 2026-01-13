@@ -89,3 +89,15 @@
     msg: >-
       Share '{{ share_config.name }}'
       {% if share_check.status == 200 %}already exists{% elif share_create_result.status is defined and share_create_result.status == 202 %}created successfully{% else %}processed{% endif %}
+
+# Apply share objective if specified in share_config
+- name: "Apply objective to share {{ share_config.name }}"
+  ansible.builtin.include_tasks: share_apply_objective.yml
+  vars:
+    share_objective_config:
+      share_name: "{{ share_config.name }}"
+      objective: "{{ share_config.objective }}"
+      applicability: "{{ share_config.objective_applicability | default('TRUE') }}"
+  when:
+    - share_config.objective is defined
+    - hammerspace_apply_share_objectives | default(false)
