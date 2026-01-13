@@ -19,8 +19,8 @@
 - [ ] create volumes with:
   - [ ] --create-placement-objectives
   - [x] low-threshold 90, high-threshold 98
-  - [ ] define optional --skip-configuration-test, --skip-performance-test
+  - [x] define optional --skip-configuration-test, --skip-performance-test
   - [ ] volume naming az${ser}:$hostname:$vol
-  - [ ] optional additional-ip-add
-  - [ ] optional availability_drop
+  - [x] optional additional-ip-add
+  - [x] optional availability_drop
 - [ ] Tunable Anvil Delete Rate 
