@@ -21,6 +21,7 @@ Tier 0 transforms existing local NVMe storage on GPU servers into ultra-fast, pe
 - **Export Management**: Configures exports with proper `no_root_squash` for Hammerspace nodes and `root_squash` for clients
 - **Firewall Setup**: Opens required ports for NFS, including RDMA port 20049
 - **iptables Flush**: Automatically flushes iptables rules at playbook start to prevent connectivity issues
+- **Mount Point Protection**: systemd guard services and auto-remount watchdog to prevent accidental unmounts
 
 ### Hammerspace Integration
 - **Node Registration**: Automatically registers storage servers via Anvil REST API
@@ -53,7 +54,8 @@ Tier 0 transforms existing local NVMe storage on GPU servers into ultra-fast, pe
 ```
 ansible-storage-setup/
 ├── ansible.cfg              # Ansible configuration
-├── inventory.yml            # Server inventory
+├── inventory.yml            # Static server inventory (manual)
+├── inventory_oci.yml        # OCI dynamic inventory (auto-discovery)
 ├── site.yml                 # Main playbook
 ├── verify_nfs.yml           # NFS verification playbook
 ├── vars/
@@ -100,13 +102,17 @@ Install Ansible on your control machine (laptop, workstation, or bastion):
 brew install ansible
 
 # Linux/pip
-pip install ansible
+pip install ansible --break-system-packages
 
 # Install required collections
 ansible-galaxy collection install -r requirements.yml
 ```
 
 ### 2. Configure Inventory
+
+You can use either **static inventory** (manual) or **OCI dynamic inventory** (auto-discovery).
+
+#### Option A: Static Inventory (Manual)
 
 Edit `inventory.yml` to add your Tier 0 / LSS servers:
 
@@ -129,6 +135,100 @@ all:
       hosts:
         localhost:
           ansible_connection: local
+```
+
+#### Option B: OCI Dynamic Inventory (Recommended for OCI)
+
+Auto-discover instances from Oracle Cloud Infrastructure.
+
+**1. Install OCI CLI:**
+```bash
+# Interactive install (prompts for directories)
+sudo bash -c "$(curl -L https://raw.githubusercontent.com/oracle/oci-cli/master/scripts/install/install.sh)"
+
+# Non-interactive install (uses defaults)
+sudo bash -c "$(curl -L https://raw.githubusercontent.com/oracle/oci-cli/master/scripts/install/install.sh)" -- --accept-all-defaults
+
+# Verify installation
+oci --version
+```
+
+**2. Install OCI Ansible collection and Python SDK:**
+```bash
+# Install OCI Ansible collection
+ansible-galaxy collection install oracle.oci
+
+# Install OCI Python SDK
+pip3 install oci
+```
+
+**3. Configure OCI authentication:**
+```bash
+# Create OCI config directory
+mkdir -p ~/.oci
+
+# Interactive setup (creates config file and API key)
+oci setup config
+
+# Or copy existing config from another machine
+# scp user@source:~/.oci/config ~/.oci/
+# scp user@source:~/.oci/oci_api_key.pem ~/.oci/
+```
+
+**4. Edit `inventory.oci.yml`:**
+
+Note: The file MUST be named with `.oci.yml` extension for the OCI plugin to recognize it.
+
+```yaml
+---
+plugin: oracle.oci.oci
+regions:
+  - us-sanjose-1  # Your region
+fetch_hosts_from_subcompartments: true
+
+hostname_format_preferences:
+  - "private_ip"
+  - "display_name"
+
+# Filter to only running instances with specific shape
+include_filters:
+  - lifecycle_state: "RUNNING"
+    shape: "VM.DenseIO.E5.Flex"  # Or BM.GPU.GB200-v3.4
+
+# Create storage_servers group
+groups:
+  storage_servers: "'VM.DenseIO.E5.Flex' in shape"
+
+# Set connection variables
+compose:
+  ansible_host: private_ip
+  ansible_user: ubuntu
+  ansible_python_interpreter: /usr/bin/python3
+  ansible_become: true
+```
+
+**5. Update `ansible.cfg` to use dynamic inventory and SSH key:**
+```ini
+[defaults]
+inventory = inventory.oci.yml
+private_key_file = /home/ubuntu/.ssh/ansible_admin_key
+```
+
+**6. Test the inventory:**
+```bash
+# List discovered hosts
+ansible-inventory -i inventory.oci.yml --list
+
+# Show as graph
+ansible-inventory -i inventory.oci.yml --graph
+
+# Ping all storage servers
+ansible storage_servers -m ping
+```
+
+**Find your compartment OCID:**
+```bash
+oci iam compartment list --query "data[].{name:name, id:id}" --output table
 ```
 
 ### 3. Configure Variables
@@ -493,6 +593,96 @@ UUID=f9e8d7c6-b5a4-3210-fedc-ba0987654321  /hammerspace/hsvol1  xfs  defaults,no
 ```
 
 UUID-based mounts ensure reliability even if device names change across reboots.
+
+## Mount Point Protection
+
+The playbook can deploy systemd-based mount protection to prevent accidental unmounting and ensure mounts automatically recover. Based on Hammerspace engineering guide "Protecting Linux Mount Points with systemd".
+
+### Features
+
+| Feature | Description |
+|---------|-------------|
+| **Boot Safety** | `nofail` and `x-systemd.automount` options ensure system boots even if storage is unavailable |
+| **Guard Services** | Keeps a process with cwd on each mount point, preventing `umount` |
+| **Auto-Remount Watchdog** | Timer checks every minute and remounts if accidentally unmounted |
+| **RefuseManualStop** | Guard services cannot be stopped via `systemctl stop` |
+
+### Enable Mount Protection
+
+Add to `vars/main.yml`:
+
+```yaml
+# Enable all mount protection features
+hammerspace_mount_protection: true
+
+# Individual feature toggles (all default to true when protection is enabled)
+hammerspace_mount_guard_enabled: true      # Guard services (busy-lock)
+hammerspace_remount_watchdog_enabled: true # Auto-remount timer
+hammerspace_remount_watchdog_interval: "1min"  # Check frequency
+hammerspace_automount_timeout: 10          # Device timeout in seconds
+```
+
+### What Gets Deployed
+
+When `hammerspace_mount_protection: true`:
+
+**fstab options** (added automatically):
+```
+UUID=xxx  /hammerspace/hsvol0  xfs  defaults,nofail,x-systemd.automount,x-systemd.device-timeout=10  0 0
+```
+
+**systemd units**:
+```
+/etc/systemd/system/
+├── hammerspace-guards.target           # Target for all guard services
+├── hammerspace-hsvol0-guard.service    # Guard service per mount
+├── hammerspace-hsvol1-guard.service
+├── hammerspace-remount.service         # Remount check service
+└── hammerspace-remount.timer           # Watchdog timer (runs every 1min)
+
+/usr/local/bin/
+└── hammerspace-remount-check.sh        # Script to check and remount
+```
+
+### How Guard Services Work
+
+Each guard service runs `sleep infinity` with its working directory set to the mount point:
+
+```ini
+[Service]
+ExecStart=/bin/bash -lc 'cd /hammerspace/hsvol0 && exec sleep infinity'
+RefuseManualStop=yes
+```
+
+This makes the mount "busy" - attempting to unmount will fail:
+```bash
+$ umount /hammerspace/hsvol0
+umount: /hammerspace/hsvol0: target is busy.
+```
+
+### Managing Protected Mounts
+
+To intentionally unmount a protected mount point:
+
+```bash
+# 1. Stop the guard service (requires killing the process)
+systemctl kill hammerspace-hsvol0-guard.service
+
+# 2. Now unmount is possible
+umount /hammerspace/hsvol0
+```
+
+To check protection status:
+```bash
+# View all guard services
+systemctl list-units 'hammerspace-*-guard.service'
+
+# Check watchdog timer
+systemctl status hammerspace-remount.timer
+
+# View recent remount activity
+journalctl -t hammerspace-remount
+```
 
 ## Hammerspace-Specific Configuration
 

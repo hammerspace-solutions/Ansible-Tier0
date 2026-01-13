@@ -87,12 +87,17 @@
   loop_control:
     label: "{{ item.path }}"
 
+- name: Build mount options with automount protection
+  ansible.builtin.set_fact:
+    automount_opts: "nofail,x-systemd.automount,x-systemd.device-timeout={{ hammerspace_automount_timeout | default(10) }}"
+  when: hammerspace_mount_protection | default(false)
+
 - name: Mount filesystems using UUID
   ansible.posix.mount:
     path: "{{ item.path }}"
     src: "UUID={{ item.uuid }}"
     fstype: "{{ item.fstype }}"
-    opts: "{{ item.mount_opts }}"
+    opts: "{{ item.mount_opts }}{% if hammerspace_mount_protection | default(false) %},{{ automount_opts }}{% endif %}"
     state: mounted
   loop: "{{ mount_points_with_uuid }}"
   loop_control:
@@ -106,3 +111,11 @@
 - name: Display mount status
   ansible.builtin.debug:
     var: df_output.stdout_lines
+
+# ============================================================================
+# Mount Point Protection (systemd guards + auto-remount watchdog)
+# ============================================================================
+
+- name: Include mount protection tasks
+  ansible.builtin.include_tasks: mount_protection.yml
+  when: hammerspace_mount_protection | default(false)

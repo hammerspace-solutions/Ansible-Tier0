@@ -47,3 +47,13 @@
   ansible.builtin.systemd:
     name: rpcbind
     state: restarted
+
+- name: Reload udev rules
+  ansible.builtin.shell: |
+    udevadm control --reload-rules
+    udevadm trigger --subsystem-match=bdi
+  changed_when: true
+
+- name: Reload systemd daemon
+  ansible.builtin.systemd:
+    daemon_reload: true

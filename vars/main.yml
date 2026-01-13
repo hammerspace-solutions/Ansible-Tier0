@@ -113,13 +113,37 @@ hammerspace_volume_low_threshold: 0.90
 hammerspace_volume_online_delay: 0
 
 # unavailableStateAvailabilityMultiplier: availability drop behavior
-# 0 = disabled (--availability-drop-disabled)
-# 1 = enabled (--availability-drop-enabled)
-hammerspace_volume_unavailable_multiplier: 1
+# 0 = enabled (--availability-drop-enabled) - availability drops to 0 when unavailable
+# 1 = disabled (--availability-drop-disabled) - availability unchanged when unavailable
+hammerspace_volume_unavailable_multiplier: 0
 
 # availability and durability levels
 hammerspace_volume_availability: 2
 hammerspace_volume_durability: 3
+
+# ============================================================================
+# Volume Naming and Configuration Options
+# ============================================================================
+# AZ prefix for volume naming (format: "AZ1:" for multi-AZ deployments)
+# Volume name format: [az_prefix]node_name::path
+# Example with prefix: "AZ1:tier0-node-01::/hammerspace/hsvol0"
+# Example without prefix: "tier0-node-01::/hammerspace/hsvol0"
+hammerspace_volume_az_prefix: ""
+
+# Create placement objectives for volumes (recommended for automated tiering)
+hammerspace_create_placement_objectives: true
+
+# Skip performance test when adding volumes (faster deployment)
+hammerspace_skip_performance_test: true
+
+# Additional IP addresses for volume access (optional)
+# hammerspace_additional_ips:
+#   - "10.0.1.100"
+#   - "10.0.1.101"
+
+# IP addresses to exclude from volume access (optional)
+# hammerspace_excluded_ips:
+#   - "10.0.1.200"
 
 # Create Hammerspace shares (optional)
 hammerspace_create_shares: false
@@ -364,6 +388,27 @@ firewalld_services:
   - nfs
   - rpc-bind
   - mountd
+
+# ============================================================================
+# Mount Point Protection (systemd guards)
+# ============================================================================
+# Protects mount points from accidental unmounting using systemd guard services
+# Based on Hammerspace "Protecting Linux Mount Points with systemd" guide
+
+# Enable mount point protection (guard services + auto-remount watchdog)
+hammerspace_mount_protection: true
+
+# Guard service keeps a process with cwd on mount point to prevent unmount
+hammerspace_mount_guard_enabled: true
+
+# Auto-remount watchdog checks and remounts if accidentally unmounted
+hammerspace_remount_watchdog_enabled: true
+
+# Watchdog check interval (how often to verify mounts)
+hammerspace_remount_watchdog_interval: "1min"
+
+# systemd automount timeout for device availability
+hammerspace_automount_timeout: 10
 
 # ============================================================================
 # Safety Settings

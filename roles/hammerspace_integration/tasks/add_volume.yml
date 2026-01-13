@@ -1,24 +1,48 @@
 ---
 # Add a storage volume to Hammerspace
 # Called from main.yml with volume_config variable
+#
+# Volume naming convention: [AZ:]nodename::path
+# Example: AZ1:tier0-node-01::/hammerspace/hsvol0
 
 # Check task queue before adding volume (throttling)
 - name: "Wait for task queue before adding {{ volume_config.path }}"
   ansible.builtin.include_tasks: task_queue_wait.yml
   when: hammerspace_task_queue_throttle | default(true)
 
+# Build the volume name with optional AZ prefix
+- name: "Set volume name for {{ volume_config.path }}"
+  ansible.builtin.set_fact:
+    volume_name: "{{ hammerspace_volume_az_prefix | default('') }}{{ hammerspace_node_name | default(inventory_hostname) }}::{{ volume_config.path }}"
+    node_name: "{{ hammerspace_volume_az_prefix | default('') }}{{ hammerspace_node_name | default(inventory_hostname) }}"
+
 - name: "Build volume payload for {{ volume_config.path }}"
   ansible.builtin.set_fact:
     volume_payload:
       _type: "STORAGE_VOLUME"
-      name: "{{ hammerspace_node_name | default(inventory_hostname) }}::{{ volume_config.path }}"
+      name: "{{ volume_name }}"
       logicalVolume:
-        name: "{{ volume_config.path }}"
         _type: "LOGICAL_VOLUME"
+        name: "{{ volume_config.path }}"
+        node:
+          _type: "NODE"
+          name: "{{ node_name }}"
+        exportPath: "{{ volume_config.path }}"
+        fsType: "THIRD_PARTY"
+        usageType: "DS"
+        ipAddresses:
+          - address: "{{ hammerspace_node_ip | default(ansible_default_ipv4.address) }}"
+            prefixLength: 32
+        createPlacementObjectives: "{{ hammerspace_create_placement_objectives | default(true) }}"
+        skipPerfTest: "{{ hammerspace_skip_performance_test | default(true) }}"
+        isSharedChecked: true
+        isReadOnlyChecked: false
       node:
-        name: "{{ hammerspace_node_name | default(inventory_hostname) }}"
         _type: "NODE"
+        name: "{{ node_name }}"
       accessType: "{{ volume_config.access_type | default('READ_WRITE') }}"
+      additionalAddresses: "{{ hammerspace_additional_ips | default([]) }}"
+      excludedIpAddresses: "{{ hammerspace_excluded_ips | default([]) }}"
       storageCapabilities:
         performance:
           utilizationThreshold: "{{ hammerspace_volume_high_threshold | default(0.98) }}"
@@ -29,9 +53,14 @@
           availability: "{{ hammerspace_volume_availability | default(2) }}"
           durability: "{{ hammerspace_volume_durability | default(3) }}"
 
+- name: "Debug volume payload"
+  ansible.builtin.debug:
+    var: volume_payload
+  when: hammerspace_debug | default(false)
+
 - name: "Check if volume {{ volume_config.path }} already exists"
   ansible.builtin.uri:
-    url: "{{ hs_api_url }}/storage-volumes/{{ volume_payload.name | urlencode }}"
+    url: "{{ hs_api_url }}/storage-volumes/{{ volume_name | urlencode }}"
     user: "{{ hammerspace_api_user }}"
     password: "{{ hammerspace_api_password }}"
     method: GET
@@ -45,9 +74,9 @@
 - name: "Debug volume check result"
   ansible.builtin.debug:
     msg: |
-      Volume check for '{{ volume_payload.name }}':
+      Volume check for '{{ volume_name }}':
       Status: {{ volume_check.status | default('undefined') }}
-      URL: {{ hs_api_url }}/storage-volumes/{{ volume_payload.name | urlencode }}
+      URL: {{ hs_api_url }}/storage-volumes/{{ volume_name | urlencode }}
   when: hammerspace_debug | default(false)
 
 - name: "Set volume exists flag"
@@ -97,5 +126,5 @@
 - name: "Display volume {{ volume_config.path }} status"
   ansible.builtin.debug:
     msg: >-
-      Volume '{{ volume_payload.name }}'
+      Volume '{{ volume_name }}'
       {% if volume_already_exists %}already exists (skipped){% else %}added successfully{% endif %}

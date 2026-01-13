@@ -1,0 +1,31 @@
+---
+# OCI Dynamic Inventory for Ansible
+# Prerequisites:
+#   ansible-galaxy collection install oracle.oci
+#   pip3 install oci
+#   oci setup config
+
+plugin: oracle.oci.oci
+regions:
+  - us-sanjose-1
+fetch_hosts_from_subcompartments: true
+
+hostname_format_preferences:
+  - "display_name"
+  - "private_ip"
+
+# Filter to only running instances with specific shape
+include_filters:
+  - lifecycle_state: "RUNNING"
+    shape: "VM.DenseIO.E5.Flex"
+
+# Create storage_servers group
+groups:
+  storage_servers: "'VM.DenseIO.E5.Flex' in shape"
+
+# Set connection variables
+compose:
+  ansible_host: private_ip
+  ansible_user: ubuntu
+  ansible_python_interpreter: /usr/bin/python3
+  ansible_become: true
