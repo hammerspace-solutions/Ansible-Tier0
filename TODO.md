@@ -5,11 +5,12 @@
 - [ ] umount protection for the raid volumes and add details to the README document
 - [x] numa node nvme match
 - [ ] keep out the first and last NVMe drives from the raid
-- [ ] Block Device Read-Ahead
-- [ ] NFS client Read-Ahead
-- [ ] sunrpc module parameter pool_mode = pernode
+- [x] Block Device Read-Ahead
+- [x] NFS client Read-Ahead
+- [x] sunrpc module parameter pool_mode = pernode
 - [x] use raid volumes without defining partitions
 - [x] use /hammerspace directory as a root for all volume mount points
+- [x] automatic or manualy tier 0 instance listing
 
 ## Hammerspace
 - [ ] create AZ according to the rack distributions
