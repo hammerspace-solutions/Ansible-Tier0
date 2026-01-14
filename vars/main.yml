@@ -11,8 +11,9 @@
 # Note: If projected volume count > 1000, RAID configuration is recommended
 use_raid: true
 
-# XFS allocation group count for mkfs.xfs
+# XFS allocation group count for mkfs.xfs (optional)
 # Hammerspace recommends agcount=512 for optimal performance
+# Comment out or remove to use mkfs.xfs default (auto-calculated based on device size)
 xfs_agcount: 512
 
 # ============================================================================
@@ -28,6 +29,107 @@ raid_level: 0
 
 # Base path for mount points (arrays mount as /hammerspace/hsvol0, hsvol1, etc.)
 mount_base_path: /hammerspace
+
+# ============================================================================
+# RAID Array Sizing Options
+# ============================================================================
+# Control how drives are grouped into RAID arrays
+
+# Maximum drives per RAID array (0 = unlimited, use all drives per NUMA node)
+# Examples:
+#   0  - One RAID per NUMA node with all drives (default)
+#   4  - Split into arrays of 4 drives each
+#   8  - Split into arrays of 8 drives each
+raid_max_drives_per_array: 0
+
+# Minimum drives required to create a RAID array
+# Arrays with fewer drives will be skipped (useful for uneven NUMA distribution)
+raid_min_drives_per_array: 2
+
+# RAID grouping strategy
+# Options:
+#   numa     - Group by NUMA node, then split by max_drives (default)
+#   single   - Single RAID array across all drives (ignore NUMA)
+#   per_drive - Each drive as separate mount (no RAID)
+raid_grouping_strategy: numa
+
+# Power of 2 alignment for drive count
+# When true, rounds down drive count to nearest power of 2 (2, 4, 8, 16...)
+# Recommended for RAID 0 performance
+raid_power_of_2_drives: false
+
+# How to handle leftover drives that don't fit in arrays
+# (applies when using max_drives_per_array or power_of_2_drives)
+# Options:
+#   skip     - Ignore leftover drives, don't include in any array (default)
+#   separate - Create a separate smaller array for leftovers
+#   add_last - Add leftover drives to the last array (uneven array size)
+#   individual - Mount leftover drives individually (no RAID)
+raid_leftover_drives: skip
+
+# ============================================================================
+# NVMe Device Exclusion
+# ============================================================================
+# Exclude specific NVMe devices from RAID configuration
+# Boot device is always excluded automatically
+
+# Option 1: Exclude by device name (e.g., nvme0n1, nvme1n1)
+nvme_exclude_devices: []
+  # - nvme0n1    # Exclude specific device
+  # - nvme1n1
+
+# Option 2: Exclude by device path (e.g., /dev/nvme0n1)
+nvme_exclude_paths: []
+  # - /dev/nvme0n1
+  # - /dev/nvme1n1
+
+# Option 3: Exclude by serial number (useful for consistent exclusion across reboots)
+nvme_exclude_serials: []
+  # - "S5XXXX0123456789"
+  # - "S5XXXX9876543210"
+
+# Option 4: Exclude by model name (exclude all drives of specific model)
+nvme_exclude_models: []
+  # - "Samsung SSD 980 PRO"
+  # - "Intel Optane"
+
+# Option 5: Exclude by NUMA node (exclude all drives on specific NUMA node)
+nvme_exclude_numa_nodes: []
+  # - 0    # Exclude all NVMe on NUMA node 0
+  # - 1
+
+# ============================================================================
+# CPU-Optimized RAID Configuration
+# ============================================================================
+# Automatically tune RAID parameters based on CPU vendor best practices
+# Set to true to auto-detect CPU and apply optimized settings
+cpu_optimized_raid: true
+
+# Manual override: Set specific CPU vendor profile
+# Options: auto, amd_epyc, amd_epyc_genoa, intel_xeon, intel_xeon_sapphire
+# cpu_vendor_profile: auto
+
+# ---- AMD EPYC Optimizations (Genoa/Milan/Rome) ----
+# - NUMA-aware RAID grouping (one array per NUMA node)
+# - Chunk size 512K for large sequential I/O
+# - Queue depth optimized for high core count
+#
+# ---- Intel Xeon Optimizations (Sapphire Rapids/Ice Lake) ----
+# - NUMA-aware RAID grouping
+# - Chunk size 256K-512K depending on workload
+# - I/O scheduler tuning for Intel NVMe
+
+# RAID chunk size in KB (auto-tuned if cpu_optimized_raid: true)
+# AMD EPYC: 512 (optimal for high-bandwidth workloads)
+# Intel Xeon: 256 or 512
+# raid_chunk_size: 512
+
+# NVMe queue depth (auto-tuned based on CPU cores)
+# nvme_queue_depth: 1024
+
+# I/O scheduler (auto-selected based on CPU/NVMe combination)
+# Options: none, mq-deadline, kyber
+# nvme_io_scheduler: none
 
 # ============================================================================
 # Manual RAID Configuration (Alternative to Dynamic Discovery)
@@ -126,9 +228,16 @@ hammerspace_volume_durability: 3
 # ============================================================================
 # AZ prefix for volume naming (format: "AZ1:" for multi-AZ deployments)
 # Volume name format: [az_prefix]node_name::path
-# Example with prefix: "AZ1:tier0-node-01::/hammerspace/hsvol0"
+# Example with prefix: "FD1:tier0-node-01::/hammerspace/hsvol0"
 # Example without prefix: "tier0-node-01::/hammerspace/hsvol0"
-hammerspace_volume_az_prefix: ""
+#
+# When using OCI dynamic inventory, this is automatically set from fault_domain:
+#   FAULT-DOMAIN-1 -> "FD1:"
+#   FAULT-DOMAIN-2 -> "FD2:"
+#   FAULT-DOMAIN-3 -> "FD3:"
+#
+# Override here for static inventory or custom naming:
+# hammerspace_volume_az_prefix: "AZ1:"
 
 # Create placement objectives for volumes (recommended for automated tiering)
 hammerspace_create_placement_objectives: true
@@ -482,6 +591,30 @@ network_test_targets:
   # Add other Tier 0/LSS nodes to test cross-node connectivity:
   # - "10.200.100.101"  # tier0-node-01
   # - "10.200.100.102"  # tier0-node-02
+
+# --- iperf Bandwidth Test (Optional) ---
+# Test network bandwidth between Tier 0 instances and Hammerspace nodes
+# Requires iperf (not iperf3) server running on target nodes
+iperf_test_enabled: false
+
+# iperf server targets (IP addresses with iperf server running)
+# Start iperf server on target: iperf -s -D
+iperf_test_targets: []
+  # - "10.0.13.213"  # Anvil node with iperf server
+  # - "10.0.0.93"    # DSX/Mover node with iperf server
+
+# iperf test duration in seconds
+iperf_test_duration: 10
+
+# iperf test parallel streams (use 16+ for 200Gbps networks)
+iperf_test_parallel: 16
+
+# Minimum expected bandwidth in Mbits/sec (warn if below this)
+# 200Gbps = 200000 Mbits/sec, set minimum to 180000 (90% threshold)
+iperf_min_bandwidth_mbps: 180000
+
+# Fail playbook if bandwidth is below minimum
+iperf_enforce_bandwidth: false
 
 # --- Package Requirements ---
 # Set to true to fail if required packages (mdadm, xfs, nvme-cli) are missing

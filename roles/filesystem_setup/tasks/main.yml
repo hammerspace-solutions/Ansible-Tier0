@@ -36,7 +36,10 @@
   failed_when: false
 
 - name: Create XFS filesystem with Hammerspace-recommended options
-  ansible.builtin.command: "mkfs.xfs -f -d agcount={{ xfs_agcount | default(512) }} -L {{ item.item.label }} {{ item.item.device }}"
+  ansible.builtin.command: >-
+    mkfs.xfs -f
+    {% if xfs_agcount is defined and xfs_agcount %}-d agcount={{ xfs_agcount }}{% endif %}
+    -L {{ item.item.label }} {{ item.item.device }}
   loop: "{{ fs_check.results }}"
   loop_control:
     label: "{{ item.item.device }}"

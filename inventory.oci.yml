@@ -23,9 +23,34 @@ include_filters:
 groups:
   storage_servers: "'VM.DenseIO.E5.Flex' in shape"
 
-# Set connection variables
+# Set connection variables and expose OCI metadata
 compose:
   ansible_host: private_ip
   ansible_user: ubuntu
   ansible_python_interpreter: /usr/bin/python3
   ansible_become: true
+  # OCI metadata
+  oci_fault_domain: fault_domain
+  oci_availability_domain: availability_domain
+  oci_compartment_id: compartment_id
+  oci_shape: shape
+  oci_region: region
+  # CPU and shape details
+  oci_ocpus: shape_config.ocpus | default('')
+  oci_memory_gb: shape_config.memory_in_gbs | default('')
+  oci_processor_description: shape_config.processor_description | default('')
+  oci_networking_bandwidth_gbps: shape_config.networking_bandwidth_in_gbps | default('')
+  oci_local_disks: shape_config.local_disks | default('')
+  oci_local_disks_total_gb: shape_config.local_disks_total_size_in_gbs | default('')
+  # Hammerspace AZ prefix derived from fault domain
+  # FAULT-DOMAIN-1 -> "FD1:", FAULT-DOMAIN-2 -> "FD2:", etc.
+  hammerspace_volume_az_prefix: fault_domain | regex_replace('FAULT-DOMAIN-', 'FD') ~ ":"
+
+# Create groups based on fault domain
+keyed_groups:
+  - key: fault_domain
+    prefix: fd
+    separator: "_"
+  - key: availability_domain
+    prefix: ad
+    separator: "_"

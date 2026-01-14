@@ -15,6 +15,13 @@
     mount_points: "{{ mount_points | default([]) }}"
     nfs_exports: "{{ nfs_exports | default([]) }}"
 
+# ============================================================================
+# CPU-Optimized RAID Configuration
+# ============================================================================
+- name: Include CPU optimization tasks
+  ansible.builtin.include_tasks: cpu_optimization.yml
+  when: cpu_optimized_raid | default(true)
+
 - name: Identify boot device (device containing root filesystem)
   ansible.builtin.shell: |
     lsblk -no PKNAME "$(findmnt -n -o SOURCE /)" 2>/dev/null | head -1
@@ -29,35 +36,94 @@
   ansible.builtin.debug:
     msg: "Boot device detected: {{ boot_device }} (will be excluded from RAID)"
 
-- name: Discover all NVMe devices with NUMA node assignments
+- name: Discover all NVMe devices with NUMA node, serial, and model
   ansible.builtin.shell: |
     for nvme in /sys/class/nvme/nvme*; do
       if [ -d "$nvme" ]; then
         name=$(basename "$nvme")
         numa=$(cat "$nvme/device/numa_node" 2>/dev/null || echo "-1")
+        serial=$(cat "$nvme/serial" 2>/dev/null | xargs || echo "unknown")
+        model=$(cat "$nvme/model" 2>/dev/null | xargs || echo "unknown")
         # Check if the namespace exists (nvmeXn1)
         if [ -b "/dev/${name}n1" ]; then
-          echo "${name}:${numa}"
+          echo "${name}:${numa}:${serial}:${model}"
         fi
       fi
     done
   register: nvme_numa_raw
   changed_when: false
 
-- name: Build NVMe device list with NUMA info (excluding boot device)
+- name: Initialize excluded devices list
   ansible.builtin.set_fact:
-    nvme_devices: >-
+    nvme_excluded_devices: []
+
+- name: Build NVMe device list with full info
+  ansible.builtin.set_fact:
+    nvme_all_devices: >-
       {{
-        nvme_devices | default([]) + [{
+        nvme_all_devices | default([]) + [{
           'name': item.split(':')[0],
           'device': '/dev/' + item.split(':')[0] + 'n1',
-          'numa': item.split(':')[1] | int
+          'numa': item.split(':')[1] | int,
+          'serial': item.split(':')[2],
+          'model': ':'.join(item.split(':')[3:])
         }]
       }}
   loop: "{{ nvme_numa_raw.stdout_lines | default([]) }}"
-  when:
-    - item | length > 0
-    - item.split(':')[0] != boot_device
+  when: item | length > 0
+
+- name: Apply exclusion rules
+  ansible.builtin.set_fact:
+    nvme_devices: >-
+      {{
+        nvme_all_devices | default([]) | rejectattr('name', 'equalto', boot_device)
+        | rejectattr('name', 'in', nvme_exclude_devices | default([]) | map('regex_replace', 'n1$', '') | list)
+        | rejectattr('device', 'in', nvme_exclude_paths | default([]))
+        | rejectattr('serial', 'in', nvme_exclude_serials | default([]))
+        | rejectattr('numa', 'in', nvme_exclude_numa_nodes | default([]))
+        | list
+      }}
+
+- name: Apply model exclusion
+  ansible.builtin.set_fact:
+    nvme_devices: >-
+      {{
+        nvme_devices | rejectattr('model', 'in', nvme_exclude_models | default([])) | list
+      }}
+  when: nvme_exclude_models | default([]) | length > 0
+
+- name: Build excluded devices list for reporting
+  ansible.builtin.set_fact:
+    nvme_excluded_devices: >-
+      {{
+        nvme_all_devices | default([]) | difference(nvme_devices) | list
+      }}
+
+- name: Display exclusion information
+  ansible.builtin.debug:
+    msg: |
+      NVMe Exclusion Summary:
+      ============================================
+      Boot device (always excluded): {{ boot_device }}
+      Excluded by device name: {{ nvme_exclude_devices | default([]) | join(', ') | default('none') }}
+      Excluded by path: {{ nvme_exclude_paths | default([]) | join(', ') | default('none') }}
+      Excluded by serial: {{ nvme_exclude_serials | default([]) | join(', ') | default('none') }}
+      Excluded by model: {{ nvme_exclude_models | default([]) | join(', ') | default('none') }}
+      Excluded by NUMA node: {{ nvme_exclude_numa_nodes | default([]) | join(', ') | default('none') }}
+
+      Devices excluded from RAID:
+      {% for dev in nvme_excluded_devices %}
+        - {{ dev.device }} ({{ dev.model }}, Serial: {{ dev.serial }}, NUMA: {{ dev.numa }})
+      {% endfor %}
+      {% if nvme_excluded_devices | length == 0 %}
+        (none - only boot device excluded)
+      {% endif %}
+      ============================================
+  when: nvme_exclude_devices | default([]) | length > 0 or
+        nvme_exclude_paths | default([]) | length > 0 or
+        nvme_exclude_serials | default([]) | length > 0 or
+        nvme_exclude_models | default([]) | length > 0 or
+        nvme_exclude_numa_nodes | default([]) | length > 0
 
 - name: Get unique NUMA nodes
   ansible.builtin.set_fact:
@@ -80,52 +146,33 @@
       NVMe DISCOVERY RESULTS
       ============================================
       Boot device (excluded): {{ boot_device }}
-      Total NVMe devices found: {{ nvme_devices | length }}
+      Total NVMe devices for RAID: {{ nvme_devices | length }}
+      Excluded devices: {{ nvme_excluded_devices | length }}
       NUMA nodes detected: {{ numa_nodes | join(', ') }}
 
       Devices by NUMA node:
       {% for numa in numa_nodes %}
       NUMA {{ numa }}: {{ nvme_by_numa[numa | string] | join(', ') }}
       {% endfor %}
+
+      Device Details:
+      {% for dev in nvme_devices %}
+        {{ dev.device }}: {{ dev.model }} (Serial: {{ dev.serial }}, NUMA: {{ dev.numa }})
+      {% endfor %}
       ============================================
 
-- name: Build dynamic RAID arrays grouped by NUMA node
-  ansible.builtin.set_fact:
-    discovered_raid_arrays: >-
-      {{
-        discovered_raid_arrays | default([]) + [{
-          'name': 'md' + (loop_index | string),
-          'device': '/dev/md' + (loop_index | string),
-          'level': raid_level | default(0),
-          'numa_node': item | int,
-          'drives': nvme_by_numa[item | string]
-        }]
-      }}
-  loop: "{{ numa_nodes | map('string') | list }}"
-  loop_control:
-    index_var: loop_index
-  when: nvme_by_numa[item] | length > 0
-
-- name: Build dynamic mount points for discovered arrays
-  ansible.builtin.set_fact:
-    discovered_mount_points: >-
-      {{
-        discovered_mount_points | default([]) + [{
-          'path': mount_base_path | default('/hammerspace') + '/hsvol' + (loop_index | string),
-          'device': item.device,
-          'fstype': 'xfs',
-          'label': 'hsvol' + (loop_index | string),
-          'mount_opts': 'defaults,nofail,discard'
-        }]
-      }}
-  loop: "{{ discovered_raid_arrays }}"
-  loop_control:
-    index_var: loop_index
+# ============================================================================
+# Build RAID Arrays (with sizing options)
+# ============================================================================
+- name: Include RAID array building tasks
+  ansible.builtin.include_tasks: build_raid_arrays.yml
 
 - name: Override raid_arrays with discovered configuration
   ansible.builtin.set_fact:
     raid_arrays: "{{ discovered_raid_arrays }}"
-  when: use_dynamic_discovery | default(true)
+  when:
+    - use_dynamic_discovery | default(true)
+    - raid_grouping_strategy | default('numa') != 'per_drive'
 
 - name: Override mount_points with discovered configuration
   ansible.builtin.set_fact:

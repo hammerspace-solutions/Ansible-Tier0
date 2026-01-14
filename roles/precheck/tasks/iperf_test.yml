@@ -1,0 +1,115 @@
+---
+# iperf Bandwidth Test
+# Tests network bandwidth between Tier 0 instances and Hammerspace nodes
+# Requires iperf server running on target nodes: iperf -s -D
+
+- name: Check if iperf is installed
+  ansible.builtin.command: which iperf
+  register: iperf_check
+  changed_when: false
+  failed_when: false
+
+- name: Install iperf package
+  ansible.builtin.package:
+    name: iperf
+    state: present
+  when: iperf_check.rc != 0
+
+- name: Initialize iperf results
+  ansible.builtin.set_fact:
+    iperf_results: []
+
+- name: Run iperf bandwidth test to each target
+  ansible.builtin.shell: |
+    iperf -c {{ item }} -t {{ iperf_test_duration | default(10) }} -P {{ iperf_test_parallel | default(4) }} -f m 2>&1
+  loop: "{{ iperf_test_targets | default([]) }}"
+  register: iperf_raw_results
+  changed_when: false
+  failed_when: false
+  when: iperf_test_targets | default([]) | length > 0
+
+- name: Parse iperf results
+  ansible.builtin.set_fact:
+    iperf_results: >-
+      {{
+        iperf_results + [{
+          'target': item.item,
+          'success': item.rc == 0,
+          'bandwidth_mbps': (item.stdout | regex_search('\[SUM\].*?([0-9.]+)\s+Mbits/sec', '\1') | first | default('0')) if item.rc == 0 else '0',
+          'output': item.stdout_lines | default([]) | last | default('No output')
+        }]
+      }}
+  loop: "{{ iperf_raw_results.results | default([]) }}"
+  loop_control:
+    label: "{{ item.item | default('unknown') }}"
+  when: iperf_raw_results.results is defined
+
+- name: Display iperf bandwidth results
+  ansible.builtin.debug:
+    msg: |
+      iperf Bandwidth Test Results:
+      ============================================
+      Test parameters:
+        Duration: {{ iperf_test_duration | default(10) }} seconds
+        Parallel streams: {{ iperf_test_parallel | default(4) }}
+        Minimum expected: {{ iperf_min_bandwidth_mbps | default(9000) }} Mbits/sec
+
+      Results:
+      {% for result in iperf_results %}
+        {{ result.target }}:
+          Status: {{ 'OK' if result.success else 'FAILED' }}
+          Bandwidth: {{ result.bandwidth_mbps }} Mbits/sec {{ '[BELOW MINIMUM]' if result.bandwidth_mbps | float < (iperf_min_bandwidth_mbps | default(9000)) else '[OK]' }}
+          Details: {{ result.output }}
+      {% endfor %}
+      ============================================
+  when: iperf_results | length > 0
+
+- name: Identify targets with low bandwidth
+  ansible.builtin.set_fact:
+    iperf_low_bandwidth_targets: "{{ iperf_results | selectattr('bandwidth_mbps', 'defined') | selectattr('success') | list | json_query('[?to_number(bandwidth_mbps) < `' + (iperf_min_bandwidth_mbps | default(9000) | string) + '`]') }}"
+  when: iperf_results | length > 0
+
+- name: Warn on low bandwidth
+  ansible.builtin.debug:
+    msg: |
+      WARNING: The following targets have bandwidth below {{ iperf_min_bandwidth_mbps | default(9000) }} Mbits/sec:
+      {% for result in iperf_low_bandwidth_targets %}
+        - {{ result.target }}: {{ result.bandwidth_mbps }} Mbits/sec
+      {% endfor %}
+  when:
+    - iperf_low_bandwidth_targets is defined
+    - iperf_low_bandwidth_targets | length > 0
+
+- name: Fail on low bandwidth if enforced
+  ansible.builtin.fail:
+    msg: |
+      ERROR: Network bandwidth below minimum threshold ({{ iperf_min_bandwidth_mbps | default(9000) }} Mbits/sec).
+      Failed targets:
+      {% for result in iperf_low_bandwidth_targets %}
+        - {{ result.target }}: {{ result.bandwidth_mbps }} Mbits/sec
+      {% endfor %}
+
+      Check network configuration, MTU settings, and switch capacity.
+      Set iperf_enforce_bandwidth: false to continue anyway.
+  when:
+    - iperf_enforce_bandwidth | default(false)
+    - iperf_low_bandwidth_targets is defined
+    - iperf_low_bandwidth_targets | length > 0
+
+- name: Identify failed iperf connections
+  ansible.builtin.set_fact:
+    iperf_failed_targets: "{{ iperf_results | rejectattr('success') | list }}"
+  when: iperf_results | length > 0
+
+- name: Warn on failed iperf connections
+  ansible.builtin.debug:
+    msg: |
+      WARNING: Could not connect to iperf server on the following targets:
+      {% for result in iperf_failed_targets %}
+        - {{ result.target }}: {{ result.output }}
+      {% endfor %}
+
+      Ensure iperf server is running on target: iperf -s -D
+  when:
+    - iperf_failed_targets is defined
+    - iperf_failed_targets | length > 0

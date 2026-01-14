@@ -187,8 +187,8 @@ regions:
 fetch_hosts_from_subcompartments: true
 
 hostname_format_preferences:
+  - "display_name"  # Use instance name as inventory_hostname
   - "private_ip"
-  - "display_name"
 
 # Filter to only running instances with specific shape
 include_filters:
@@ -199,12 +199,33 @@ include_filters:
 groups:
   storage_servers: "'VM.DenseIO.E5.Flex' in shape"
 
-# Set connection variables
+# Set connection variables and OCI metadata
 compose:
   ansible_host: private_ip
   ansible_user: ubuntu
   ansible_python_interpreter: /usr/bin/python3
   ansible_become: true
+  # OCI metadata as host variables
+  oci_fault_domain: fault_domain
+  oci_availability_domain: availability_domain
+  # CPU and shape details
+  oci_ocpus: shape_config.ocpus | default('')
+  oci_memory_gb: shape_config.memory_in_gbs | default('')
+  oci_processor_description: shape_config.processor_description | default('')
+  oci_networking_bandwidth_gbps: shape_config.networking_bandwidth_in_gbps | default('')
+  oci_local_disks: shape_config.local_disks | default('')
+  oci_local_disks_total_gb: shape_config.local_disks_total_size_in_gbs | default('')
+  # Auto-derive Hammerspace AZ prefix from fault domain
+  hammerspace_volume_az_prefix: fault_domain | regex_replace('FAULT-DOMAIN-', 'FD') ~ ":"
+
+# Create groups based on fault domain and availability domain
+keyed_groups:
+  - key: fault_domain
+    prefix: fd
+    separator: "_"
+  - key: availability_domain
+    prefix: ad
+    separator: "_"
 ```
 
 **5. Update `ansible.cfg` to use dynamic inventory and SSH key:**
@@ -229,6 +250,95 @@ ansible storage_servers -m ping
 **Find your compartment OCID:**
 ```bash
 oci iam compartment list --query "data[].{name:name, id:id}" --output table
+```
+
+#### OCI Fault Domain to Hammerspace AZ Mapping
+
+The OCI dynamic inventory automatically maps fault domains to Hammerspace availability zone prefixes for volume naming:
+
+| OCI Fault Domain | Hammerspace AZ Prefix | Volume Name Example |
+|------------------|----------------------|---------------------|
+| FAULT-DOMAIN-1 | `FD1:` | `FD1:instance-name::/hammerspace/hsvol0` |
+| FAULT-DOMAIN-2 | `FD2:` | `FD2:instance-name::/hammerspace/hsvol0` |
+| FAULT-DOMAIN-3 | `FD3:` | `FD3:instance-name::/hammerspace/hsvol0` |
+
+This is configured in `inventory.oci.yml` via the `compose` section:
+
+```yaml
+compose:
+  # ... connection settings ...
+  # Hammerspace AZ prefix derived from fault domain
+  hammerspace_volume_az_prefix: fault_domain | regex_replace('FAULT-DOMAIN-', 'FD') ~ ":"
+```
+
+**Verify fault domain mapping:**
+```bash
+# Check AZ prefix for all hosts
+ansible-inventory --list | grep -E "(hammerspace_volume_az_prefix|oci_fault_domain)"
+
+# Or for a specific host
+ansible-inventory --host <instance-name>
+```
+
+**Custom AZ naming:**
+```yaml
+# Use AZ1, AZ2, AZ3 instead of FD1, FD2, FD3:
+hammerspace_volume_az_prefix: fault_domain | regex_replace('FAULT-DOMAIN-', 'AZ') ~ ":"
+
+# Custom mapping for specific names:
+hammerspace_volume_az_prefix: >-
+  {{ {'FAULT-DOMAIN-1': 'WEST:', 'FAULT-DOMAIN-2': 'CENTRAL:', 'FAULT-DOMAIN-3': 'EAST:'}.get(fault_domain, '') }}
+```
+
+**Dynamic groups by fault domain:**
+
+The inventory also creates groups based on fault domain:
+```
+@fd_FAULT_DOMAIN_1:
+  |--instance1
+  |--instance2
+@fd_FAULT_DOMAIN_2:
+  |--instance3
+```
+
+This allows targeting specific fault domains:
+```bash
+ansible fd_FAULT_DOMAIN_1 -m ping
+```
+
+#### OCI Instance Details (CPU, Memory, Storage)
+
+The inventory automatically exposes instance shape details as host variables:
+
+| Variable | Description | Example |
+|----------|-------------|---------|
+| `oci_processor_description` | CPU type | "AMD EPYC 9J14 96-Core Processor" |
+| `oci_ocpus` | Number of OCPUs | 32 |
+| `oci_memory_gb` | Memory in GB | 512 |
+| `oci_networking_bandwidth_gbps` | Network bandwidth | 200 |
+| `oci_local_disks` | Number of local NVMe disks | 8 |
+| `oci_local_disks_total_gb` | Total local disk size in GB | 51200 |
+
+**Query instance details:**
+```bash
+# List CPU info for all hosts
+ansible-inventory --list | jq '._meta.hostvars | to_entries[] | {host: .key, cpu: .value.oci_processor_description, ocpus: .value.oci_ocpus}'
+
+# Full details for specific host
+ansible-inventory --host <instance-name>
+```
+
+**Use in playbooks:**
+```yaml
+- name: Display instance specs
+  debug:
+    msg: |
+      Host: {{ inventory_hostname }}
+      CPU: {{ oci_processor_description }}
+      OCPUs: {{ oci_ocpus }}
+      Memory: {{ oci_memory_gb }} GB
+      Network: {{ oci_networking_bandwidth_gbps }} Gbps
+      Local Disks: {{ oci_local_disks }} ({{ oci_local_disks_total_gb }} GB total)
 ```
 
 ### 3. Configure Variables
@@ -352,8 +462,127 @@ When `use_dynamic_discovery: true`, the playbook automatically:
 
 1. **Detects boot device**: Uses `findmnt` to identify which NVMe contains the root filesystem
 2. **Discovers NVMe devices**: Scans `/sys/class/nvme/` for all NVMe controllers
-3. **Groups by NUMA node**: Reads `/sys/class/nvme/nvmeX/device/numa_node` for each device
-4. **Creates RAID arrays**: One array per NUMA node for optimal memory locality
+3. **Applies exclusion rules**: Filters out boot device and user-specified exclusions
+4. **Groups by NUMA node**: Reads `/sys/class/nvme/nvmeX/device/numa_node` for each device
+5. **Creates RAID arrays**: One array per NUMA node for optimal memory locality
+
+### NVMe Device Exclusion
+
+Exclude specific NVMe devices from RAID configuration. The boot device is always excluded automatically.
+
+```yaml
+# vars/main.yml
+
+# Option 1: Exclude by device name
+nvme_exclude_devices:
+  - nvme0n1
+  - nvme1n1
+
+# Option 2: Exclude by device path
+nvme_exclude_paths:
+  - /dev/nvme0n1
+  - /dev/nvme1n1
+
+# Option 3: Exclude by serial number (consistent across reboots)
+nvme_exclude_serials:
+  - "S5XXXX0123456789"
+
+# Option 4: Exclude by model name (exclude all drives of specific model)
+nvme_exclude_models:
+  - "Samsung SSD 980 PRO"
+  - "Intel Optane"
+
+# Option 5: Exclude by NUMA node
+nvme_exclude_numa_nodes:
+  - 0    # Exclude all NVMe on NUMA node 0
+```
+
+**Example output with exclusions:**
+```
+NVMe Exclusion Summary:
+============================================
+Boot device (always excluded): nvme8
+Excluded by serial: S5XXXX0123456789
+Excluded by NUMA node: 0
+
+Devices excluded from RAID:
+  - /dev/nvme0n1 (Samsung SSD 990 PRO, Serial: S5XXXX0123456789, NUMA: 1)
+  - /dev/nvme4n1 (Samsung SSD 990 PRO, Serial: S5XXXX1111111111, NUMA: 0)
+  - /dev/nvme5n1 (Samsung SSD 990 PRO, Serial: S5XXXX2222222222, NUMA: 0)
+============================================
+```
+
+**Use cases:**
+- Reserve NVMe for OS/swap space
+- Exclude slower or smaller drives
+- Separate storage tiers (fast vs capacity)
+- Exclude drives for other applications
+
+### RAID Array Sizing Options
+
+Control how drives are grouped into RAID arrays:
+
+```yaml
+# vars/main.yml
+
+# Maximum drives per RAID array (0 = unlimited)
+raid_max_drives_per_array: 0    # Default: all drives per NUMA node
+raid_max_drives_per_array: 4    # Split into arrays of 4 drives
+raid_max_drives_per_array: 8    # Split into arrays of 8 drives
+
+# Minimum drives required (skip if fewer)
+raid_min_drives_per_array: 2
+
+# Grouping strategy
+raid_grouping_strategy: numa      # Group by NUMA node (default)
+raid_grouping_strategy: single    # One RAID across all drives
+raid_grouping_strategy: per_drive # No RAID, individual mounts
+
+# Round down to power of 2 (recommended for RAID 0)
+raid_power_of_2_drives: false
+```
+
+**Example: 16 drives, max 4 per array, NUMA strategy**
+```
+NUMA 0 (8 drives): md0 (4 drives), md1 (4 drives)
+NUMA 1 (8 drives): md2 (4 drives), md3 (4 drives)
+Result: 4 RAID arrays, 4 mount points
+```
+
+**Example: 16 drives, single strategy**
+```
+All drives: md0 (16 drives)
+Result: 1 RAID array, 1 mount point
+```
+
+**Example: 8 drives, per_drive strategy**
+```
+No RAID: 8 individual XFS mounts
+Result: 0 RAID arrays, 8 mount points
+```
+
+**Power of 2 alignment:**
+```yaml
+# With 6 drives and power_of_2 enabled:
+raid_power_of_2_drives: true
+# Uses 4 drives (nearest power of 2), 2 drives leftover
+```
+
+**Leftover drives handling:**
+```yaml
+# What to do with drives that don't fit in full arrays
+raid_leftover_drives: skip       # Ignore leftovers (default)
+raid_leftover_drives: separate   # Create smaller separate array
+raid_leftover_drives: add_last   # Add to last array (uneven size)
+raid_leftover_drives: individual # Mount individually (no RAID)
+```
+
+| Drives | Max/Array | Leftover Option | Result |
+|--------|-----------|-----------------|--------|
+| 7 | 4 | skip | 1 array (4 drives), 3 unused |
+| 7 | 4 | separate | 2 arrays (4+3 drives) |
+| 7 | 4 | add_last | 1 array (7 drives) |
+| 7 | 4 | individual | 1 array (4 drives) + 3 mounts |
 
 ### Example Discovery Output
 
@@ -376,6 +605,115 @@ md1 (/dev/md1):
   Drives (4): /dev/nvme0n1, /dev/nvme1n1, /dev/nvme2n1, /dev/nvme3n1
 ```
 
+## CPU-Optimized RAID Configuration
+
+When `cpu_optimized_raid: true` (default), the playbook automatically detects the CPU vendor and applies best-practice RAID settings for optimal NVMe performance.
+
+### Supported CPU Profiles
+
+**x86_64 Processors:**
+
+| CPU | Profile | Chunk Size | Queue Depth | I/O Scheduler |
+|-----|---------|------------|-------------|---------------|
+| AMD EPYC Genoa (9004) | `amd_epyc_genoa` | 512KB | 1024 | none |
+| AMD EPYC Milan/Rome | `amd_epyc` | 512KB | 512 | none |
+| Intel Xeon Sapphire Rapids | `intel_xeon_sapphire` | 256KB | 512 | none |
+| Intel Xeon (other) | `intel_xeon` | 256KB | 256 | mq-deadline |
+
+**ARM (aarch64) Processors:**
+
+| CPU | Profile | Chunk Size | Queue Depth | I/O Scheduler |
+|-----|---------|------------|-------------|---------------|
+| ARM Neoverse V2 (Graviton4) | `arm_neoverse_v2` | 512KB | 1024 | none |
+| NVIDIA Grace | `arm_nvidia_grace` | 512KB | 1024 | none |
+| Ampere Altra/Altra Max | `arm_ampere_altra` | 512KB | 1024 | none |
+| AWS Graviton3 | `arm_graviton3` | 512KB | 512 | none |
+| AWS Graviton2 | `arm_graviton2` | 512KB | 512 | none |
+| ARM Generic | `arm_generic` | 512KB | 512 | none |
+
+**Fallback:**
+
+| CPU | Profile | Chunk Size | Queue Depth | I/O Scheduler |
+|-----|---------|------------|-------------|---------------|
+| Generic | `generic` | 512KB | 256 | none |
+
+### Configuration
+
+```yaml
+# vars/main.yml
+
+# Enable CPU-based auto-tuning (default: true)
+cpu_optimized_raid: true
+
+# Manual override: force specific profile
+# cpu_vendor_profile: amd_epyc_genoa
+
+# Manual override: specific settings (takes precedence over auto-detection)
+# raid_chunk_size: 512      # KB
+# nvme_queue_depth: 1024
+# nvme_io_scheduler: none   # none, mq-deadline, kyber
+```
+
+### Example Output
+
+```
+CPU Detection Results:
+============================================
+Model: AMD EPYC 9J14 96-Core Processor
+Vendor: AuthenticAMD
+Cores: 192
+NUMA Nodes: 2
+Detected Profile: amd_epyc_genoa
+OCI Processor: AMD EPYC 9J14 96-Core Processor
+============================================
+
+CPU-Optimized RAID Configuration:
+============================================
+AMD EPYC Genoa (9004 Series) Best Practices:
+- RAID chunk size: 512KB (optimal for large sequential I/O)
+- NUMA-aware RAID: One array per NUMA node
+- XFS agcount: 512 (Hammerspace recommendation)
+- I/O scheduler: none (NVMe native multiqueue)
+- Queue depth: 1024 (high parallelism for many cores)
+
+Applied Settings:
+  RAID Chunk Size: 512KB
+  NVMe Queue Depth: 1024
+  I/O Scheduler: none
+  XFS agcount: 512
+============================================
+```
+
+### Best Practices Applied
+
+**AMD EPYC Genoa (9004 Series):**
+- 512KB chunk size for large sequential I/O (AI/ML workloads)
+- High queue depth (1024) to leverage many cores
+- NUMA-aware RAID grouping for memory locality
+- Native NVMe multiqueue (no I/O scheduler overhead)
+
+**Intel Xeon Sapphire Rapids:**
+- 256KB chunk size for balanced mixed workloads
+- Optimized queue depth for Intel architecture
+- Support for Intel Volume Management Device (VMD) if available
+
+**NVIDIA Grace:**
+- 512KB chunk size optimized for GPU workloads
+- High queue depth (1024) for 72-core processor
+- NUMA-aware RAID aligned with NVLink/PCIe topology
+- Optimized for DGX/HGX GPU systems
+
+**Ampere Altra/Altra Max:**
+- 512KB chunk size for high-bandwidth workloads
+- High queue depth (1024) for 128 cores per socket
+- NUMA-aware RAID for multi-socket configurations
+- Native NVMe multiqueue
+
+**AWS Graviton3/4:**
+- 512KB chunk size for cloud-native workloads
+- Queue depth tuned for Graviton architecture
+- Optimized for EC2 NVMe instance storage
+
 ## Pre-Setup Validation (Health Checks)
 
 The `precheck` role performs comprehensive environment validation per Hammerspace Tier 0 Deployment Guide recommendations. Run with `--tags precheck` to validate before deployment.
@@ -389,6 +727,7 @@ The `precheck` role performs comprehensive environment validation per Hammerspac
 | **NUMA Balance** | Warns if drives are unevenly distributed across NUMA nodes | `warn_on_numa_imbalance` |
 | **4K Sector Size** | Checks if drives use recommended 4096-byte sectors | `expected_sector_size`, `require_4k_sectors` |
 | **MTU / Jumbo Frames** | Tests network connectivity with jumbo frames | `expected_mtu`, `network_test_targets` |
+| **iperf Bandwidth** | Tests network bandwidth to Hammerspace nodes | `iperf_test_enabled`, `iperf_test_targets` |
 | **Package Availability** | Checks for mdadm, xfsprogs, nvme-cli, etc. | `fail_on_missing_packages` |
 
 ### Configuration Options
@@ -417,6 +756,59 @@ network_test_targets:
   - "10.200.100.101"          # Other Tier 0 nodes
 enforce_mtu_test: false       # Set true to fail on MTU issues
 ```
+
+### iperf Bandwidth Test (Optional)
+
+Test network bandwidth between Tier 0 instances and Hammerspace nodes using iperf (not iperf3).
+
+**Prerequisites:** Start iperf server on target Hammerspace nodes:
+```bash
+# On Anvil/DSX nodes
+iperf -s -D   # runs as daemon in background
+```
+
+**Configuration:**
+```yaml
+# vars/main.yml
+
+# Enable iperf bandwidth testing
+iperf_test_enabled: true
+
+# iperf server targets (nodes running iperf -s)
+iperf_test_targets:
+  - "10.0.13.213"    # Anvil node
+  - "10.0.0.93"      # DSX/Mover node
+
+# Test parameters (tuned for 200Gbps+ networks)
+iperf_test_duration: 10          # Test duration in seconds
+iperf_test_parallel: 16          # Parallel streams (16+ for 200Gbps)
+iperf_min_bandwidth_mbps: 180000 # 90% of 200Gbps (Mbits/sec)
+iperf_enforce_bandwidth: false   # Set true to fail if below minimum
+```
+
+**Example output (200Gbps network):**
+```
+iperf Bandwidth Test Results:
+============================================
+Test parameters:
+  Duration: 10 seconds
+  Parallel streams: 16
+  Minimum expected: 180000 Mbits/sec
+
+Results:
+  10.0.13.213:
+    Status: OK
+    Bandwidth: 194320 Mbits/sec [OK]
+  10.0.0.93:
+    Status: OK
+    Bandwidth: 191280 Mbits/sec [OK]
+============================================
+```
+
+**Troubleshooting:**
+- `Could not connect to iperf server` - Ensure iperf server is running: `iperf -s -D`
+- Low bandwidth - Check MTU settings, switch configuration, and NIC settings
+- Connection refused - Check firewall allows port 5001 (iperf default)
 
 ### 4K NVMe Sector Formatting
 

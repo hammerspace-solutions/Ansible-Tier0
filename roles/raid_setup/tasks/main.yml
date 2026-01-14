@@ -67,6 +67,7 @@
     mdadm --create --verbose {{ item.device }}
     --level={{ item.level }}
     --raid-devices={{ item.drives | length }}
+    {% if raid_chunk_size is defined and item.level in [0, 5, 6, 10] %}--chunk={{ raid_chunk_size }}{% endif %}
     {{ item.drives | join(' ') }}
     --run
   loop: "{{ raid_arrays }}"
@@ -77,6 +78,7 @@
     - force_raid_recreate | default(false) or item.name not in existing_arrays
   register: raid_creation
   # mdadm may prompt - using --run to skip
+  # chunk size is auto-tuned based on CPU if cpu_optimized_raid: true
 
 - name: Wait for RAID arrays to sync (for mirrored/parity arrays)
   ansible.builtin.command: cat /proc/mdstat
