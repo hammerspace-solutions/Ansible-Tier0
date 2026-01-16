@@ -613,11 +613,17 @@ network_test_targets:
 
 # --- iperf Bandwidth Test (Optional) ---
 # Test network bandwidth between Tier 0 instances and Hammerspace nodes
-# Requires iperf (not iperf3) server running on target nodes
 iperf_test_enabled: false
 
+# iperf version: "iperf3" (recommended) or "iperf" (legacy)
+# iperf3: Uses JSON output, port 5201, more accurate for high-speed networks
+# iperf:  Uses text output, port 5001, legacy support
+iperf_version: "iperf3"
+
 # iperf server targets (IP addresses with iperf server running)
-# Start iperf server on target: iperf -s -D
+# Start server on target:
+#   iperf3: iperf3 -s -D  (port 5201)
+#   iperf:  iperf -s -D   (port 5001)
 iperf_test_targets: []
   # - "10.0.13.213"  # Anvil node with iperf server
   # - "10.0.0.93"    # DSX/Mover node with iperf server
