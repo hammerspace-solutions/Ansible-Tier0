@@ -202,8 +202,8 @@ groups:
 # Set connection variables and OCI metadata
 compose:
   ansible_host: private_ip
-  ansible_user: ubuntu
-  ansible_python_interpreter: /usr/bin/python3
+  ansible_user: "'ubuntu'"  # Quoted string literal for Jinja2
+  ansible_python_interpreter: "'/usr/bin/python3'"
   ansible_become: true
   # OCI metadata as host variables
   oci_fault_domain: fault_domain
@@ -215,8 +215,9 @@ compose:
   oci_networking_bandwidth_gbps: shape_config.networking_bandwidth_in_gbps | default('')
   oci_local_disks: shape_config.local_disks | default('')
   oci_local_disks_total_gb: shape_config.local_disks_total_size_in_gbs | default('')
-  # Auto-derive Hammerspace AZ prefix from fault domain
-  hammerspace_volume_az_prefix: fault_domain | regex_replace('FAULT-DOMAIN-', 'FD') ~ ":"
+  # Hammerspace AZ prefix (disabled by default, configure in vars/main.yml)
+  # Uncomment to enable auto-detection from fault domain:
+  # hammerspace_volume_az_prefix: fault_domain | regex_replace('FAULT-DOMAIN-', 'FD') ~ ":"
 
 # Create groups based on fault domain and availability domain
 keyed_groups:
@@ -252,9 +253,38 @@ ansible storage_servers -m ping
 oci iam compartment list --query "data[].{name:name, id:id}" --output table
 ```
 
-#### OCI Fault Domain to Hammerspace AZ Mapping
+#### Hammerspace Volume AZ Prefix Configuration
 
-The OCI dynamic inventory automatically maps fault domains to Hammerspace availability zone prefixes for volume naming:
+The AZ (Availability Zone) prefix in volume names is **optional** and controlled via `vars/main.yml`. When enabled, volumes are named with an AZ prefix for multi-zone deployments.
+
+| Configuration | Volume Name Example |
+|---------------|---------------------|
+| Prefix disabled (default) | `instance-name::/hammerspace/hsvol0` |
+| Prefix enabled (FD1) | `FD1:instance-name::/hammerspace/hsvol0` |
+| Prefix enabled (AZ1) | `AZ1:instance-name::/hammerspace/hsvol0` |
+
+**Configuration Options in `vars/main.yml`:**
+
+```yaml
+# Option 1: Disable AZ prefix (default)
+hammerspace_volume_az_prefix_enabled: false
+
+# Option 2: Enable with static prefix for all nodes
+hammerspace_volume_az_prefix_enabled: true
+hammerspace_volume_az_prefix_mode: "AZ1:"
+
+# Option 3: Enable with auto-detection from OCI fault domain
+# FAULT-DOMAIN-1 -> FD1:, FAULT-DOMAIN-2 -> FD2:, etc.
+hammerspace_volume_az_prefix_enabled: true
+hammerspace_volume_az_prefix_mode: "auto"
+
+# Option 4: Direct override (ignores above settings)
+hammerspace_volume_az_prefix: "WEST:"
+```
+
+**OCI Fault Domain Auto-Mapping:**
+
+When using `hammerspace_volume_az_prefix_mode: "auto"` with OCI dynamic inventory:
 
 | OCI Fault Domain | Hammerspace AZ Prefix | Volume Name Example |
 |------------------|----------------------|---------------------|
@@ -262,32 +292,35 @@ The OCI dynamic inventory automatically maps fault domains to Hammerspace availa
 | FAULT-DOMAIN-2 | `FD2:` | `FD2:instance-name::/hammerspace/hsvol0` |
 | FAULT-DOMAIN-3 | `FD3:` | `FD3:instance-name::/hammerspace/hsvol0` |
 
-This is configured in `inventory.oci.yml` via the `compose` section:
+**AZ Label Mapping for Nodes:**
+
+Separately from volume naming, you can apply availability-zone labels to nodes in Hammerspace:
 
 ```yaml
-compose:
-  # ... connection settings ...
-  # Hammerspace AZ prefix derived from fault domain
-  hammerspace_volume_az_prefix: fault_domain | regex_replace('FAULT-DOMAIN-', 'FD') ~ ":"
+# Enable AZ label mapping on nodes
+hammerspace_enable_az_mapping: true
+hammerspace_apply_az_labels: true
+
+# Optional: Default AZ for nodes without OCI fault domain
+hammerspace_default_az: "default"
+
+# Optional: Explicit AZ per host (overrides auto-detection)
+hammerspace_node_az: "FD1"
 ```
+
+AZ detection priority for node labels:
+1. Explicit `hammerspace_node_az` variable
+2. OCI fault domain (auto-detected from dynamic inventory)
+3. AZ prefix in node name (legacy format `AZ1:node-name`)
+4. Default AZ (`hammerspace_default_az`)
 
 **Verify fault domain mapping:**
 ```bash
-# Check AZ prefix for all hosts
-ansible-inventory --list | grep -E "(hammerspace_volume_az_prefix|oci_fault_domain)"
+# Check fault domain for all hosts
+ansible-inventory --list | grep -E "oci_fault_domain"
 
 # Or for a specific host
 ansible-inventory --host <instance-name>
-```
-
-**Custom AZ naming:**
-```yaml
-# Use AZ1, AZ2, AZ3 instead of FD1, FD2, FD3:
-hammerspace_volume_az_prefix: fault_domain | regex_replace('FAULT-DOMAIN-', 'AZ') ~ ":"
-
-# Custom mapping for specific names:
-hammerspace_volume_az_prefix: >-
-  {{ {'FAULT-DOMAIN-1': 'WEST:', 'FAULT-DOMAIN-2': 'CENTRAL:', 'FAULT-DOMAIN-3': 'EAST:'}.get(fault_domain, '') }}
 ```
 
 **Dynamic groups by fault domain:**
@@ -495,20 +528,36 @@ nvme_exclude_models:
 # Option 5: Exclude by NUMA node
 nvme_exclude_numa_nodes:
   - 0    # Exclude all NVMe on NUMA node 0
+
+# Option 6: Exclude by PCIe address
+nvme_exclude_pcie_addresses:
+  - "0000:03:00.0"
+  - "0000:04:00.0"
+
+# Option 7: Exclude by PCIe bus prefix
+nvme_exclude_pcie_prefixes:
+  - "0000:03"   # Exclude all on bus 03
+  - "0000:e"    # Exclude all on buses e1, e2, e3, e4
 ```
 
 **Example output with exclusions:**
 ```
 NVMe Exclusion Summary:
 ============================================
-Boot device (always excluded): nvme8
-Excluded by serial: S5XXXX0123456789
-Excluded by NUMA node: 0
+Boot device (always excluded): nvme0
+Excluded by PCIe prefix: 0000:0
 
 Devices excluded from RAID:
-  - /dev/nvme0n1 (Samsung SSD 990 PRO, Serial: S5XXXX0123456789, NUMA: 1)
-  - /dev/nvme4n1 (Samsung SSD 990 PRO, Serial: S5XXXX1111111111, NUMA: 0)
-  - /dev/nvme5n1 (Samsung SSD 990 PRO, Serial: S5XXXX2222222222, NUMA: 0)
+  - /dev/nvme0n1 (Micron_7450_MTFDKBG1T9TFR, Serial: 242649B2918C, NUMA: 0, PCIe: 0000:03:00.0)
+  - /dev/nvme1n1 (Micron_7450_MTFDKBG1T9TFR, Serial: 242649B28F32, NUMA: 0, PCIe: 0000:04:00.0)
+============================================
+
+NVMe DISCOVERY RESULTS
+============================================
+Device Details:
+  /dev/nvme2n1: ScaleFlux CSDU7UVG76 (Serial: UF2433C2412H, NUMA: 1, PCIe: 0000:e1:00.0)
+  /dev/nvme3n1: ScaleFlux CSDU7UVG76 (Serial: UF2433C2315H, NUMA: 1, PCIe: 0000:e2:00.0)
+  ...
 ============================================
 ```
 

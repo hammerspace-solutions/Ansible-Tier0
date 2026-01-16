@@ -6,3 +6,6 @@ collections:
     version: ">=1.4.0"
   - name: community.general
     version: ">=6.0.0"
+  # OCI Dynamic Inventory (optional - only needed if using inventory.oci.yml)
+  - name: oracle.oci
+    version: ">=5.0.0"

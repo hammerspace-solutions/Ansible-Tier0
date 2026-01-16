@@ -36,7 +36,7 @@
   ansible.builtin.debug:
     msg: "Boot device detected: {{ boot_device }} (will be excluded from RAID)"
 
-- name: Discover all NVMe devices with NUMA node, serial, and model
+- name: Discover all NVMe devices with NUMA node, serial, model, and PCIe address
   ansible.builtin.shell: |
     for nvme in /sys/class/nvme/nvme*; do
       if [ -d "$nvme" ]; then
@@ -44,9 +44,10 @@
         numa=$(cat "$nvme/device/numa_node" 2>/dev/null || echo "-1")
         serial=$(cat "$nvme/serial" 2>/dev/null | xargs || echo "unknown")
         model=$(cat "$nvme/model" 2>/dev/null | xargs || echo "unknown")
+        pcie=$(cat "$nvme/address" 2>/dev/null | xargs || echo "unknown")
         # Check if the namespace exists (nvmeXn1)
         if [ -b "/dev/${name}n1" ]; then
-          echo "${name}:${numa}:${serial}:${model}"
+          echo "${name}:${numa}:${serial}:${model}:${pcie}"
         fi
       fi
     done
@@ -66,7 +67,8 @@
           'device': '/dev/' + item.split(':')[0] + 'n1',
           'numa': item.split(':')[1] | int,
           'serial': item.split(':')[2],
-          'model': ':'.join(item.split(':')[3:])
+          'model': item.split(':')[3],
+          'pcie_address': ':'.join(item.split(':')[4:])
         }]
       }}
   loop: "{{ nvme_numa_raw.stdout_lines | default([]) }}"
@@ -81,6 +83,7 @@
         | rejectattr('device', 'in', nvme_exclude_paths | default([]))
         | rejectattr('serial', 'in', nvme_exclude_serials | default([]))
         | rejectattr('numa', 'in', nvme_exclude_numa_nodes | default([]))
+        | rejectattr('pcie_address', 'in', nvme_exclude_pcie_addresses | default([]))
         | list
       }}
 
@@ -91,6 +94,14 @@
         nvme_devices | rejectattr('model', 'in', nvme_exclude_models | default([])) | list
       }}
   when: nvme_exclude_models | default([]) | length > 0
+
+- name: Apply PCIe prefix exclusion
+  ansible.builtin.set_fact:
+    nvme_devices: >-
+      {{
+        nvme_devices | rejectattr('pcie_address', 'match', '^(' + nvme_exclude_pcie_prefixes | join('|') + ')') | list
+      }}
+  when: nvme_exclude_pcie_prefixes | default([]) | length > 0
 
 - name: Build excluded devices list for reporting
   ansible.builtin.set_fact:
@@ -105,15 +116,17 @@
       NVMe Exclusion Summary:
       ============================================
       Boot device (always excluded): {{ boot_device }}
-      Excluded by device name: {{ nvme_exclude_devices | default([]) | join(', ') | default('none') }}
-      Excluded by path: {{ nvme_exclude_paths | default([]) | join(', ') | default('none') }}
-      Excluded by serial: {{ nvme_exclude_serials | default([]) | join(', ') | default('none') }}
-      Excluded by model: {{ nvme_exclude_models | default([]) | join(', ') | default('none') }}
-      Excluded by NUMA node: {{ nvme_exclude_numa_nodes | default([]) | join(', ') | default('none') }}
+      Excluded by device name: {{ nvme_exclude_devices | default([]) | join(', ') | default('none', true) }}
+      Excluded by path: {{ nvme_exclude_paths | default([]) | join(', ') | default('none', true) }}
+      Excluded by serial: {{ nvme_exclude_serials | default([]) | join(', ') | default('none', true) }}
+      Excluded by model: {{ nvme_exclude_models | default([]) | join(', ') | default('none', true) }}
+      Excluded by NUMA node: {{ nvme_exclude_numa_nodes | default([]) | join(', ') | default('none', true) }}
+      Excluded by PCIe address: {{ nvme_exclude_pcie_addresses | default([]) | join(', ') | default('none', true) }}
+      Excluded by PCIe prefix: {{ nvme_exclude_pcie_prefixes | default([]) | join(', ') | default('none', true) }}
 
       Devices excluded from RAID:
       {% for dev in nvme_excluded_devices %}
-        - {{ dev.device }} ({{ dev.model }}, Serial: {{ dev.serial }}, NUMA: {{ dev.numa }})
+        - {{ dev.device }} ({{ dev.model }}, Serial: {{ dev.serial }}, NUMA: {{ dev.numa }}, PCIe: {{ dev.pcie_address }})
       {% endfor %}
       {% if nvme_excluded_devices | length == 0 %}
         (none - only boot device excluded)
@@ -123,7 +136,9 @@
         nvme_exclude_paths | default([]) | length > 0 or
         nvme_exclude_serials | default([]) | length > 0 or
         nvme_exclude_models | default([]) | length > 0 or
-        nvme_exclude_numa_nodes | default([]) | length > 0
+        nvme_exclude_numa_nodes | default([]) | length > 0 or
+        nvme_exclude_pcie_addresses | default([]) | length > 0 or
+        nvme_exclude_pcie_prefixes | default([]) | length > 0
 
 - name: Get unique NUMA nodes
   ansible.builtin.set_fact:
@@ -157,7 +172,7 @@
 
       Device Details:
       {% for dev in nvme_devices %}
-        {{ dev.device }}: {{ dev.model }} (Serial: {{ dev.serial }}, NUMA: {{ dev.numa }})
+        {{ dev.device }}: {{ dev.model }} (Serial: {{ dev.serial }}, NUMA: {{ dev.numa }}, PCIe: {{ dev.pcie_address }})
       {% endfor %}
       ============================================
 

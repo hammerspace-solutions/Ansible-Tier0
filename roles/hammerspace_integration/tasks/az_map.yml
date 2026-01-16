@@ -1,14 +1,26 @@
 ---
 # Availability Zone Mapping
-# Maps nodes to AZ labels based on naming convention
+# Maps nodes to AZ labels in Hammerspace
 # Reference: hs_ops az_map.yml
 #
-# Node name format: "AZ1:node-name" will parse AZ="AZ1"
-# If no AZ prefix found, uses hammerspace_default_az
+# AZ detection priority:
+# 1. Explicit hammerspace_node_az variable
+# 2. OCI fault domain (if oci_fault_domain is defined from dynamic inventory)
+# 3. AZ prefix in node name format "AZ1:node-name"
+# 4. Default AZ (hammerspace_default_az)
 
-- name: "Parse AZ from node name {{ hs_node_name }}"
+- name: "Determine AZ for node {{ hs_node_name }}"
   ansible.builtin.set_fact:
-    node_az: "{{ hs_node_name.split(':')[0] if ':' in hs_node_name else hammerspace_default_az | default('default') }}"
+    node_az: >-
+      {%- if hammerspace_node_az is defined -%}
+        {{ hammerspace_node_az }}
+      {%- elif oci_fault_domain is defined and oci_fault_domain -%}
+        {{ oci_fault_domain | regex_replace('FAULT-DOMAIN-', 'FD') }}
+      {%- elif ':' in hs_node_name -%}
+        {{ hs_node_name.split(':')[0] }}
+      {%- else -%}
+        {{ hammerspace_default_az | default('default') }}
+      {%- endif -%}
     node_base_name: "{{ hs_node_name.split(':')[1] if ':' in hs_node_name else hs_node_name }}"
 
 - name: "Display AZ mapping"

@@ -34,9 +34,10 @@
       {{
         iperf_results + [{
           'target': item.item,
-          'success': item.rc == 0,
-          'bandwidth_mbps': (item.stdout | regex_search('\[SUM\].*?([0-9.]+)\s+Mbits/sec', '\1') | first | default('0')) if item.rc == 0 else '0',
-          'output': item.stdout_lines | default([]) | last | default('No output')
+          'success': item.rc == 0 and 'connect failed' not in item.stdout,
+          'bandwidth_mbps': ((item.stdout | regex_search('\[SUM\].*?([0-9.]+)\s+Mbits/sec', '\1') | default(['0'], true) | first) if '[SUM]' in item.stdout else '0'),
+          'output': item.stdout_lines | default([]) | last | default('No output'),
+          'error': 'No route to host' if 'No route to host' in item.stdout else ('Connection refused' if 'Connection refused' in item.stdout else ('No SUM line' if '[SUM]' not in item.stdout and item.rc == 0 else ''))
         }]
       }}
   loop: "{{ iperf_raw_results.results | default([]) }}"
@@ -58,7 +59,9 @@
       {% for result in iperf_results %}
         {{ result.target }}:
           Status: {{ 'OK' if result.success else 'FAILED' }}
-          Bandwidth: {{ result.bandwidth_mbps }} Mbits/sec {{ '[BELOW MINIMUM]' if result.bandwidth_mbps | float < (iperf_min_bandwidth_mbps | default(9000)) else '[OK]' }}
+          Bandwidth: {{ result.bandwidth_mbps }} Mbits/sec {{ '[BELOW MINIMUM]' if result.bandwidth_mbps | float < (iperf_min_bandwidth_mbps | default(9000)) and result.success else ('[OK]' if result.success else '') }}
+          {% if result.error | default('') %}Error: {{ result.error }}{% endif %}
+
           Details: {{ result.output }}
       {% endfor %}
       ============================================

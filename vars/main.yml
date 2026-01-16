@@ -98,6 +98,16 @@ nvme_exclude_numa_nodes: []
   # - 0    # Exclude all NVMe on NUMA node 0
   # - 1
 
+# Option 6: Exclude by PCIe address (e.g., 0000:03:00.0)
+nvme_exclude_pcie_addresses: []
+  # - "0000:03:00.0"   # Exclude specific PCIe slot
+  # - "0000:04:00.0"
+
+# Option 7: Exclude by PCIe address prefix (exclude all devices on PCIe bus)
+nvme_exclude_pcie_prefixes: []
+  # - "0000:03"   # Exclude all devices on bus 03
+  # - "0000:e"    # Exclude all devices on buses starting with 'e'
+
 # ============================================================================
 # CPU-Optimized RAID Configuration
 # ============================================================================
@@ -231,13 +241,22 @@ hammerspace_volume_durability: 3
 # Example with prefix: "FD1:tier0-node-01::/hammerspace/hsvol0"
 # Example without prefix: "tier0-node-01::/hammerspace/hsvol0"
 #
-# When using OCI dynamic inventory, this is automatically set from fault_domain:
-#   FAULT-DOMAIN-1 -> "FD1:"
-#   FAULT-DOMAIN-2 -> "FD2:"
-#   FAULT-DOMAIN-3 -> "FD3:"
+# Enable AZ prefix in volume names (default: false)
+hammerspace_volume_az_prefix_enabled: false
+
+# Static AZ prefix (used when hammerspace_volume_az_prefix_enabled: true)
+# Set to empty string "" to disable prefix entirely
+# Set to a static value like "AZ1:" for all nodes
+# Set to "auto" to derive from OCI fault domain (requires OCI dynamic inventory)
+hammerspace_volume_az_prefix_mode: ""  # Options: "", "auto", or static value like "AZ1:"
+
+# The actual prefix used in volume names (computed based on above settings)
+# - If hammerspace_volume_az_prefix_enabled is false: no prefix
+# - If hammerspace_volume_az_prefix_mode is "auto": derived from OCI fault domain
+# - Otherwise: uses the literal value of hammerspace_volume_az_prefix_mode
 #
-# Override here for static inventory or custom naming:
-# hammerspace_volume_az_prefix: "AZ1:"
+# You can also set this directly to override all above settings:
+# hammerspace_volume_az_prefix: "FD1:"
 
 # Create placement objectives for volumes (recommended for automated tiering)
 hammerspace_create_placement_objectives: true
