@@ -15,7 +15,7 @@
       {%- if hammerspace_node_az is defined -%}
         {{ hammerspace_node_az }}
       {%- elif oci_fault_domain is defined and oci_fault_domain -%}
-        {{ oci_fault_domain | regex_replace('FAULT-DOMAIN-', 'FD') }}
+        {{ oci_fault_domain | regex_replace('FAULT-DOMAIN-', 'AZ') }}
       {%- elif ':' in hs_node_name -%}
         {{ hs_node_name.split(':')[0] }}
       {%- else -%}

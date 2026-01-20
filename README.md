@@ -217,7 +217,7 @@ compose:
   oci_local_disks_total_gb: shape_config.local_disks_total_size_in_gbs | default('')
   # Hammerspace AZ prefix (disabled by default, configure in vars/main.yml)
   # Uncomment to enable auto-detection from fault domain:
-  # hammerspace_volume_az_prefix: fault_domain | regex_replace('FAULT-DOMAIN-', 'FD') ~ ":"
+  # hammerspace_volume_az_prefix: fault_domain | regex_replace('FAULT-DOMAIN-', 'AZ') ~ ":"
 
 # Create groups based on fault domain and availability domain
 keyed_groups:
@@ -260,8 +260,8 @@ The AZ (Availability Zone) prefix in volume names is **optional** and controlled
 | Configuration | Volume Name Example |
 |---------------|---------------------|
 | Prefix disabled (default) | `instance-name::/hammerspace/hsvol0` |
-| Prefix enabled (FD1) | `FD1:instance-name::/hammerspace/hsvol0` |
 | Prefix enabled (AZ1) | `AZ1:instance-name::/hammerspace/hsvol0` |
+| Prefix enabled (custom) | `WEST:instance-name::/hammerspace/hsvol0` |
 
 **Configuration Options in `vars/main.yml`:**
 
@@ -288,9 +288,9 @@ When using `hammerspace_volume_az_prefix_mode: "auto"` with OCI dynamic inventor
 
 | OCI Fault Domain | Hammerspace AZ Prefix | Volume Name Example |
 |------------------|----------------------|---------------------|
-| FAULT-DOMAIN-1 | `FD1:` | `FD1:instance-name::/hammerspace/hsvol0` |
-| FAULT-DOMAIN-2 | `FD2:` | `FD2:instance-name::/hammerspace/hsvol0` |
-| FAULT-DOMAIN-3 | `FD3:` | `FD3:instance-name::/hammerspace/hsvol0` |
+| FAULT-DOMAIN-1 | `AZ1:` | `AZ1:instance-name::/hammerspace/hsvol0` |
+| FAULT-DOMAIN-2 | `AZ2:` | `AZ2:instance-name::/hammerspace/hsvol0` |
+| FAULT-DOMAIN-3 | `AZ3:` | `AZ3:instance-name::/hammerspace/hsvol0` |
 
 **AZ Label Mapping for Nodes:**
 

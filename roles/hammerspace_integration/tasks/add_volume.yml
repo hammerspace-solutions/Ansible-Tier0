@@ -19,7 +19,7 @@
       {%- elif not (hammerspace_volume_az_prefix_enabled | default(false)) -%}
 
       {%- elif (hammerspace_volume_az_prefix_mode | default('')) == 'auto' -%}
-        {{ oci_fault_domain | default('') | regex_replace('FAULT-DOMAIN-', 'FD') }}{{ ':' if oci_fault_domain is defined and oci_fault_domain else '' }}
+        {{ oci_fault_domain | default('') | regex_replace('FAULT-DOMAIN-', 'AZ') }}{{ ':' if oci_fault_domain is defined and oci_fault_domain else '' }}
       {%- else -%}
         {{ hammerspace_volume_az_prefix_mode | default('') }}
       {%- endif -%}

@@ -43,9 +43,9 @@ compose:
   oci_local_disks: shape_config.local_disks | default('')
   oci_local_disks_total_gb: shape_config.local_disks_total_size_in_gbs | default('')
   # Hammerspace AZ prefix derived from fault domain (disabled by default)
-  # FAULT-DOMAIN-1 -> "FD1:", FAULT-DOMAIN-2 -> "FD2:", etc.
+  # FAULT-DOMAIN-1 -> "AZ1:", FAULT-DOMAIN-2 -> "AZ2:", etc.
   # Uncomment to enable AZ prefix in volume names:
-  # hammerspace_volume_az_prefix: fault_domain | regex_replace('FAULT-DOMAIN-', 'FD') ~ ":"
+  # hammerspace_volume_az_prefix: fault_domain | regex_replace('FAULT-DOMAIN-', 'AZ') ~ ":"
 
 # Create groups based on fault domain
 keyed_groups:
