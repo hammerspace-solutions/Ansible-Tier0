@@ -776,7 +776,7 @@ The `precheck` role performs comprehensive environment validation per Hammerspac
 | **NUMA Balance** | Warns if drives are unevenly distributed across NUMA nodes | `warn_on_numa_imbalance` |
 | **4K Sector Size** | Checks if drives use recommended 4096-byte sectors | `expected_sector_size`, `require_4k_sectors` |
 | **MTU / Jumbo Frames** | Tests network connectivity with jumbo frames | `expected_mtu`, `network_test_targets` |
-| **iperf Bandwidth** | Tests network bandwidth to Hammerspace nodes | `iperf_test_enabled`, `iperf_test_targets` |
+| **iperf Bandwidth** | Tests network bandwidth to Hammerspace nodes (iperf3 or iperf) | `iperf_test_enabled`, `iperf_version`, `iperf_test_targets` |
 | **Package Availability** | Checks for mdadm, xfsprogs, nvme-cli, etc. | `fail_on_missing_packages` |
 
 ### Configuration Options
@@ -808,12 +808,24 @@ enforce_mtu_test: false       # Set true to fail on MTU issues
 
 ### iperf Bandwidth Test (Optional)
 
-Test network bandwidth between Tier 0 instances and Hammerspace nodes using iperf (not iperf3).
+Test network bandwidth between Tier 0 instances and Hammerspace nodes. Supports both `iperf3` (recommended) and `iperf` (legacy).
+
+**Version Comparison:**
+
+| Feature | iperf3 (recommended) | iperf (legacy) |
+|---------|---------------------|----------------|
+| Default port | 5201 | 5001 |
+| Output format | JSON (reliable parsing) | Text (regex parsing) |
+| Package name | iperf3 | iperf |
+| Server command | `iperf3 -s -D` | `iperf -s -D` |
 
 **Prerequisites:** Start iperf server on target Hammerspace nodes:
 ```bash
-# On Anvil/DSX nodes
-iperf -s -D   # runs as daemon in background
+# For iperf3 (recommended)
+iperf3 -s -D   # runs as daemon on port 5201
+
+# For iperf (legacy)
+iperf -s -D    # runs as daemon on port 5001
 ```
 
 **Configuration:**
@@ -823,7 +835,10 @@ iperf -s -D   # runs as daemon in background
 # Enable iperf bandwidth testing
 iperf_test_enabled: true
 
-# iperf server targets (nodes running iperf -s)
+# Choose iperf version: "iperf3" (recommended) or "iperf" (legacy)
+iperf_version: "iperf3"
+
+# iperf server targets (nodes running iperf server)
 iperf_test_targets:
   - "10.0.13.213"    # Anvil node
   - "10.0.0.93"      # DSX/Mover node
@@ -837,9 +852,10 @@ iperf_enforce_bandwidth: false   # Set true to fail if below minimum
 
 **Example output (200Gbps network):**
 ```
-iperf Bandwidth Test Results:
+IPERF3 Bandwidth Test Results:
 ============================================
 Test parameters:
+  Tool: iperf3 (port 5201)
   Duration: 10 seconds
   Parallel streams: 16
   Minimum expected: 180000 Mbits/sec
@@ -847,17 +863,21 @@ Test parameters:
 Results:
   10.0.13.213:
     Status: OK
-    Bandwidth: 194320 Mbits/sec [OK]
+    Bandwidth: 194320.45 Mbits/sec [OK]
   10.0.0.93:
     Status: OK
-    Bandwidth: 191280 Mbits/sec [OK]
+    Bandwidth: 191280.32 Mbits/sec [OK]
 ============================================
 ```
 
 **Troubleshooting:**
-- `Could not connect to iperf server` - Ensure iperf server is running: `iperf -s -D`
+- `Could not connect to iperf server` - Ensure server is running:
+  - iperf3: `iperf3 -s -D`
+  - iperf: `iperf -s -D`
 - Low bandwidth - Check MTU settings, switch configuration, and NIC settings
-- Connection refused - Check firewall allows port 5001 (iperf default)
+- Connection refused - Check firewall allows the correct port:
+  - iperf3: port 5201
+  - iperf: port 5001
 
 ### 4K NVMe Sector Formatting
 
