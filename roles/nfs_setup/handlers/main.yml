@@ -13,6 +13,7 @@
     fi
   changed_when: false
   listen: "Restart NFS server"
+  when: not (node_already_in_hammerspace | default(false))
 
 - name: Restart rpcbind for NFS
   ansible.builtin.systemd:
@@ -20,6 +21,7 @@
     state: restarted
   ignore_errors: true
   listen: "Restart NFS server"
+  when: not (node_already_in_hammerspace | default(false))
 
 - name: Restart NFS service
   ansible.builtin.shell: |
@@ -32,6 +34,7 @@
   changed_when: true
   failed_when: false
   listen: "Restart NFS server"
+  when: not (node_already_in_hammerspace | default(false))
 
 - name: Verify NFS is running
   ansible.builtin.shell: |
@@ -42,6 +45,13 @@
   changed_when: false
   failed_when: nfs_check.rc != 0
   listen: "Restart NFS server"
+  when: not (node_already_in_hammerspace | default(false))
+
+- name: Skip NFS restart (node already in Hammerspace)
+  ansible.builtin.debug:
+    msg: "Skipping NFS service restart - node is already registered in Hammerspace"
+  listen: "Restart NFS server"
+  when: node_already_in_hammerspace | default(false)
 
 - name: Restart rpcbind
   ansible.builtin.systemd:

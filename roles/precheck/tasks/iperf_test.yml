@@ -104,28 +104,71 @@
 # ============================================================================
 # Results display and validation
 # ============================================================================
-- name: Display iperf bandwidth results
+
+# Calculate statistics
+- name: Calculate bandwidth statistics
+  ansible.builtin.set_fact:
+    _successful_results: "{{ iperf_results | selectattr('success') | list }}"
+  when: iperf_results | length > 0
+
+- name: Calculate min/max/avg bandwidth
+  ansible.builtin.set_fact:
+    _bandwidth_values: "{{ _successful_results | map(attribute='bandwidth_mbps') | map('float') | list }}"
+  when: _successful_results | default([]) | length > 0
+
+- name: Set bandwidth stats
+  ansible.builtin.set_fact:
+    _min_bandwidth: "{{ _bandwidth_values | min | round(2) }}"
+    _max_bandwidth: "{{ _bandwidth_values | max | round(2) }}"
+    _avg_bandwidth: "{{ ((_bandwidth_values | sum) / (_bandwidth_values | length)) | round(2) }}"
+    _slowest_target: "{{ _successful_results | sort(attribute='bandwidth_mbps') | first }}"
+    _fastest_target: "{{ _successful_results | sort(attribute='bandwidth_mbps') | last }}"
+  when: _bandwidth_values | default([]) | length > 0
+
+- name: Display individual test results
   ansible.builtin.debug:
     msg: |
-      {{ _iperf_version | upper }} Bandwidth Test Results:
+      {{ _iperf_version | upper }} Test: {{ item.target }}
+        Status: {{ 'OK' if item.success else 'FAILED' }}
+        Bandwidth: {{ item.bandwidth_mbps }} Mbits/sec {{ '[BELOW MINIMUM]' if (item.bandwidth_mbps | float) < (iperf_min_bandwidth_mbps | default(180000) | float) and item.success else ('[OK]' if item.success else '') }}
+        {% if item.error | default('') %}Error: {{ item.error }}{% endif %}
+  loop: "{{ iperf_results }}"
+  loop_control:
+    label: "{{ item.target }}"
+  when: iperf_results | length > 0
+
+- name: Display iperf bandwidth summary
+  ansible.builtin.debug:
+    msg: |
+      {{ _iperf_version | upper }} Bandwidth Test Summary:
       ============================================
       Test parameters:
         Tool: {{ _iperf_version }} (port {{ _iperf_port }})
         Duration: {{ iperf_test_duration | default(10) }} seconds
         Parallel streams: {{ iperf_test_parallel | default(16) }}
         Minimum expected: {{ iperf_min_bandwidth_mbps | default(180000) }} Mbits/sec
+        Targets tested: {{ iperf_results | length }}
+        Successful: {{ _successful_results | length }}
+        Failed: {{ iperf_results | length - _successful_results | length }}
 
-      Results:
-      {% for result in iperf_results %}
-        {{ result.target }}:
-          Status: {{ 'OK' if result.success else 'FAILED' }}
-          Bandwidth: {{ result.bandwidth_mbps }} Mbits/sec {{ '[BELOW MINIMUM]' if (result.bandwidth_mbps | float) < (iperf_min_bandwidth_mbps | default(180000) | float) and result.success else ('[OK]' if result.success else '') }}
-          {% if result.error | default('') %}Error: {{ result.error }}{% endif %}
+      Statistics (successful tests only):
+        Minimum: {{ _min_bandwidth }} Mbits/sec
+        Maximum: {{ _max_bandwidth }} Mbits/sec
+        Average: {{ _avg_bandwidth }} Mbits/sec
 
-          Details: {{ result.output }}
-      {% endfor %}
+      SLOWEST: {{ _slowest_target.target }} @ {{ _slowest_target.bandwidth_mbps }} Mbits/sec
+      FASTEST: {{ _fastest_target.target }} @ {{ _fastest_target.bandwidth_mbps }} Mbits/sec
       ============================================
-  when: iperf_results | length > 0
+  when: _bandwidth_values | default([]) | length > 0
+
+- name: Display failed tests summary
+  ansible.builtin.debug:
+    msg: |
+      FAILED TESTS:
+      {% for result in iperf_results | rejectattr('success') | list %}
+        - {{ result.target }}: {{ result.error | default('Unknown error') }}
+      {% endfor %}
+  when: (iperf_results | rejectattr('success') | list | length) > 0
 
 - name: Identify targets with low bandwidth
   ansible.builtin.set_fact:

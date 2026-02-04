@@ -45,6 +45,7 @@
   when:
     - sunrpc_pool_mode_before.stdout != "pernode"
     - sunrpc_pool_mode_before.stdout != "not_loaded"
+    - not (node_already_in_hammerspace | default(false))
   block:
     - name: Stop NFS server service
       ansible.builtin.shell: |
@@ -98,6 +99,14 @@
         service nfs-kernel-server start 2>/dev/null || \
         service nfs start 2>/dev/null
       changed_when: true
+
+- name: Skip sunrpc reload (node already in Hammerspace)
+  ansible.builtin.debug:
+    msg: "Skipping sunrpc module reload - node is already registered in Hammerspace (avoiding NFS service disruption)"
+  when:
+    - sunrpc_pool_mode_before.stdout != "pernode"
+    - sunrpc_pool_mode_before.stdout != "not_loaded"
+    - node_already_in_hammerspace | default(false)
 
 - name: Verify sunrpc pool_mode setting
   ansible.builtin.shell: |

@@ -14,14 +14,15 @@ hostname_format_preferences:
   - "display_name"
   - "private_ip"
 
-# Filter to only running instances with specific shape
-include_filters:
-  - lifecycle_state: "RUNNING"
-    shape: "VM.DenseIO.E5.Flex"
+# Post-fetch filters using Jinja2 expressions
+# Update the shape to match your GPU instances
+include_host_filters:
+  - "lifecycle_state == 'RUNNING'"
+  - "shape == 'BM.GPU.GB200-v3.4'"
 
 # Create storage_servers group
 groups:
-  storage_servers: "'VM.DenseIO.E5.Flex' in shape"
+  storage_servers: "shape == 'BM.GPU.GB200-v3.4'"
 
 # Set connection variables and expose OCI metadata
 compose:
@@ -42,15 +43,14 @@ compose:
   oci_networking_bandwidth_gbps: shape_config.networking_bandwidth_in_gbps | default('')
   oci_local_disks: shape_config.local_disks | default('')
   oci_local_disks_total_gb: shape_config.local_disks_total_size_in_gbs | default('')
-  # Hammerspace AZ prefix derived from fault domain (disabled by default)
+  # Hammerspace AZ prefix derived from fault domain
   # FAULT-DOMAIN-1 -> "AZ1:", FAULT-DOMAIN-2 -> "AZ2:", etc.
-  # Uncomment to enable AZ prefix in volume names:
-  # hammerspace_volume_az_prefix: fault_domain | regex_replace('FAULT-DOMAIN-', 'AZ') ~ ":"
+  hammerspace_volume_az_prefix: fault_domain | regex_replace('FAULT-DOMAIN-', 'AZ') ~ ":"
 
-# Create groups based on fault domain
+# Create groups based on fault domain and availability domain
 keyed_groups:
   - key: fault_domain
-    prefix: fd
+    prefix: az
     separator: "_"
   - key: availability_domain
     prefix: ad

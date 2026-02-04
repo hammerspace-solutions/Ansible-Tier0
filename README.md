@@ -49,15 +49,30 @@ Tier 0 transforms existing local NVMe storage on GPU servers into ultra-fast, pe
 - **Multi-Distribution Support**: Works on Debian, Ubuntu, RHEL, Rocky Linux, CentOS
 - **Firewall Auto-Detection**: Automatically detects firewalld, UFW, or iptables
 
+### Multi-Cloud Auto-Discovery
+- **AWS EC2**: Dynamic inventory via `amazon.aws.aws_ec2` plugin
+- **GCP Compute Engine**: Dynamic inventory via `google.cloud.gcp_compute` plugin
+- **OCI**: Dynamic inventory via `oracle.oci.oci` plugin
+- **Preflight Check**: Compares cloud inventory with Hammerspace to find new instances
+- **Incremental Deployment**: Deploy only to instances not yet registered in Hammerspace
+
 ## Directory Structure
 
 ```
 ansible-storage-setup/
 ├── ansible.cfg              # Ansible configuration
 ├── inventory.yml            # Static server inventory (manual)
-├── inventory_oci.yml        # OCI dynamic inventory (auto-discovery)
+├── inventory.oci.yml        # OCI dynamic inventory (auto-discovery)
+├── inventory.aws.yml        # AWS EC2 dynamic inventory (auto-discovery)
+├── inventory.gcp.yml        # GCP Compute Engine dynamic inventory (auto-discovery)
 ├── site.yml                 # Main playbook
+├── preflight_check.yml      # Compare inventory with Hammerspace (find new instances)
+├── deploy_new_instances.sh  # Automated deployment script
 ├── verify_nfs.yml           # NFS verification playbook
+├── collect_gpu_fabric.yml   # Collect GPU fabric data from instances
+├── cleanup_instance_nodes.py # Remove nodes/volumes from Hammerspace
+├── assign_az_to_volumes.py  # Assign AZ prefix based on GPU fabric
+├── DEPLOYMENT_GUIDE.md      # Step-by-step deployment guide for OCI
 ├── vars/
 │   └── main.yml             # Main variables (customize this!)
 └── roles/
@@ -110,7 +125,14 @@ ansible-galaxy collection install -r requirements.yml
 
 ### 2. Configure Inventory
 
-You can use either **static inventory** (manual) or **OCI dynamic inventory** (auto-discovery).
+You can use **static inventory** (manual) or **dynamic inventory** for auto-discovery from cloud providers:
+
+| Inventory Type | File | Use Case |
+|----------------|------|----------|
+| Static (Manual) | `inventory.yml` | On-premises, manual server list |
+| OCI Dynamic | `inventory.oci.yml` | Oracle Cloud Infrastructure |
+| AWS Dynamic | `inventory.aws.yml` | Amazon Web Services EC2 |
+| GCP Dynamic | `inventory.gcp.yml` | Google Cloud Platform Compute Engine |
 
 #### Option A: Static Inventory (Manual)
 
@@ -251,6 +273,228 @@ ansible storage_servers -m ping
 **Find your compartment OCID:**
 ```bash
 oci iam compartment list --query "data[].{name:name, id:id}" --output table
+```
+
+#### Option C: AWS Dynamic Inventory (EC2)
+
+Auto-discover instances from Amazon Web Services EC2.
+
+**1. Install AWS Ansible collection and Python SDK:**
+```bash
+# Install AWS Ansible collection
+ansible-galaxy collection install amazon.aws
+
+# Install AWS Python SDK
+pip3 install boto3 botocore
+```
+
+**2. Configure AWS authentication:**
+```bash
+# Option 1: AWS CLI configuration (recommended)
+aws configure
+
+# Option 2: Environment variables
+export AWS_ACCESS_KEY_ID='your-access-key'
+export AWS_SECRET_ACCESS_KEY='your-secret-key'
+export AWS_REGION='us-west-2'
+
+# Option 3: IAM instance role (when running on EC2)
+# No configuration needed - uses instance metadata
+```
+
+**3. Edit `inventory.aws.yml`:**
+
+Update the regions and filters to match your environment:
+
+```yaml
+plugin: amazon.aws.aws_ec2
+regions:
+  - us-west-2
+
+# Filter to only running instances with specific tags
+filters:
+  instance-state-name: running
+  tag:Role: storage      # Adjust to your tagging convention
+  # instance-type:
+  #   - p4d.24xlarge     # GPU instances
+
+# Create storage_servers group
+groups:
+  storage_servers: "'tier0' in (tags.Role | default(''))"
+
+compose:
+  ansible_host: private_ip_address
+  ansible_user: "'ubuntu'"
+  # Hammerspace AZ prefix from availability zone
+  hammerspace_volume_az_prefix: >-
+    "AZ" ~ ((placement.availability_zone[-1:] | lower | ord) - 96) ~ ":"
+```
+
+**4. Update `ansible.cfg` to use AWS inventory:**
+```ini
+[defaults]
+inventory = inventory.aws.yml
+```
+
+**5. Test the inventory:**
+```bash
+# List discovered hosts
+ansible-inventory -i inventory.aws.yml --list
+
+# Show as graph
+ansible-inventory -i inventory.aws.yml --graph
+
+# Ping all storage servers
+ansible storage_servers -m ping
+```
+
+**AWS Instance Metadata Exposed:**
+
+| Variable | Description | Example |
+|----------|-------------|---------|
+| `aws_instance_id` | EC2 instance ID | "i-0abc123def456" |
+| `aws_instance_type` | Instance type | "p4d.24xlarge" |
+| `aws_availability_zone` | Availability zone | "us-west-2a" |
+| `aws_vpc_id` | VPC ID | "vpc-12345678" |
+| `aws_private_ip` | Private IP address | "10.0.1.100" |
+
+**AWS AZ Mapping:**
+
+| AWS Availability Zone | Hammerspace AZ Prefix |
+|-----------------------|----------------------|
+| us-west-2a | `AZ1:` |
+| us-west-2b | `AZ2:` |
+| us-west-2c | `AZ3:` |
+
+#### Option D: GCP Dynamic Inventory (Compute Engine)
+
+Auto-discover instances from Google Cloud Platform Compute Engine.
+
+**1. Install GCP Ansible collection and Python SDK:**
+```bash
+# Install GCP Ansible collection
+ansible-galaxy collection install google.cloud
+
+# Install GCP Python SDK
+pip3 install google-auth requests
+```
+
+**2. Configure GCP authentication:**
+```bash
+# Option 1: Service account file (recommended for automation)
+export GOOGLE_APPLICATION_CREDENTIALS=/path/to/service-account.json
+
+# Option 2: Application default credentials (for local development)
+gcloud auth application-default login
+
+# Option 3: Compute Engine default service account (when running on GCE)
+# No configuration needed - uses instance metadata
+```
+
+**3. Edit `inventory.gcp.yml`:**
+
+**Important:** Update the `projects` field with your GCP project ID:
+
+```yaml
+plugin: google.cloud.gcp_compute
+projects:
+  - your-gcp-project-id    # REQUIRED: Replace with your project ID
+
+zones:
+  - us-central1-a
+  - us-central1-b
+  - us-central1-c
+
+auth_kind: application
+
+# Filter to only running instances
+filters:
+  - status = RUNNING
+  # - labels.role = storage    # Filter by label
+
+# Create storage_servers group
+groups:
+  storage_servers: "'tier0' in (labels.role | default(''))"
+
+compose:
+  ansible_host: networkInterfaces[0].networkIP
+  ansible_user: "'ubuntu'"
+  # Hammerspace AZ prefix from zone
+  hammerspace_volume_az_prefix: >-
+    "AZ" ~ (((zone | basename)[-1:] | lower | ord) - 96) ~ ":"
+```
+
+**4. Update `ansible.cfg` to use GCP inventory:**
+```ini
+[defaults]
+inventory = inventory.gcp.yml
+```
+
+**5. Test the inventory:**
+```bash
+# List discovered hosts
+ansible-inventory -i inventory.gcp.yml --list
+
+# Show as graph
+ansible-inventory -i inventory.gcp.yml --graph
+
+# Ping all storage servers
+ansible storage_servers -m ping
+```
+
+**GCP Instance Metadata Exposed:**
+
+| Variable | Description | Example |
+|----------|-------------|---------|
+| `gcp_instance_name` | Instance name | "tier0-node-01" |
+| `gcp_machine_type` | Machine type | "a2-highgpu-8g" |
+| `gcp_zone` | Zone | "us-central1-a" |
+| `gcp_region` | Region | "us-central1" |
+| `gcp_private_ip` | Internal IP | "10.128.0.10" |
+
+**GCP Zone Mapping:**
+
+| GCP Zone | Hammerspace AZ Prefix |
+|----------|----------------------|
+| us-central1-a | `AZ1:` |
+| us-central1-b | `AZ2:` |
+| us-central1-c | `AZ3:` |
+
+#### Option E: Multi-Cloud Inventory
+
+Use multiple cloud providers simultaneously by specifying multiple inventory files:
+
+**1. Update `ansible.cfg`:**
+```ini
+[defaults]
+# Combine all cloud inventories
+inventory = inventory.oci.yml,inventory.aws.yml,inventory.gcp.yml
+```
+
+**2. Or specify at runtime:**
+```bash
+# Use all inventories
+ansible-playbook -i inventory.oci.yml -i inventory.aws.yml -i inventory.gcp.yml site.yml
+
+# Target specific cloud
+ansible-playbook -i inventory.aws.yml site.yml
+
+# View combined inventory
+ansible-inventory -i inventory.oci.yml -i inventory.aws.yml -i inventory.gcp.yml --graph
+```
+
+**3. Target hosts by cloud provider:**
+
+Each inventory creates groups by availability zone/region:
+```bash
+# OCI: Target fault domain 1
+ansible fd_FAULT_DOMAIN_1 -m ping
+
+# AWS: Target us-west-2a
+ansible az_us-west-2a -m ping
+
+# GCP: Target us-central1-a zone
+ansible zone_us-central1-a -m ping
 ```
 
 #### Hammerspace Volume AZ Prefix Configuration
@@ -466,6 +710,127 @@ ansible-playbook site.yml --tags nfs
 ansible-playbook site.yml --tags firewall
 ansible-playbook site.yml --tags hammerspace
 ```
+
+### Preflight Check - Deploy Only New Instances
+
+The preflight check compares your cloud inventory with Hammerspace registered nodes, identifying which instances need deployment. This is the **recommended approach** for production environments.
+
+#### Quick Start
+
+```bash
+# 1. Run preflight check (compares inventory with Hammerspace)
+ansible-playbook preflight_check.yml -i inventory.aws.yml
+
+# 2. Deploy only to new instances (using the generated limit)
+ansible-playbook site.yml --limit @.new_instances_limit
+```
+
+#### Using the Automated Script
+
+```bash
+# Interactive mode - prompts for confirmation
+./deploy_new_instances.sh
+
+# Specify inventory file
+./deploy_new_instances.sh -i inventory.aws.yml
+
+# Dry run mode
+./deploy_new_instances.sh --check
+
+# Auto-deploy without confirmation (for CI/CD)
+./deploy_new_instances.sh --auto
+
+# Run precheck only on new instances
+./deploy_new_instances.sh --precheck-only
+```
+
+#### Preflight Check Output
+
+```
+================================================================================
+PREFLIGHT CHECK REPORT
+================================================================================
+Hammerspace API: 10.241.0.105
+
+SUMMARY
+--------------------------------------------------------------------------------
+Inventory hosts (storage_servers): 10
+Hammerspace registered nodes:      7
+Already registered:                7
+New instances to deploy:           3
+
+ALREADY REGISTERED (will be skipped)
+--------------------------------------------------------------------------------
+- instance-001
+- instance-002
+- instance-003
+...
+
+NEW INSTANCES (need deployment)
+--------------------------------------------------------------------------------
+- instance-008
+- instance-009
+- instance-010
+
+================================================================================
+RECOMMENDED COMMANDS
+================================================================================
+# Deploy to new instances only:
+ansible-playbook site.yml --limit "instance-008,instance-009,instance-010"
+================================================================================
+```
+
+#### Generated Files
+
+| File | Description |
+|------|-------------|
+| `.new_instances_limit` | Comma-separated list of new instance names (for `--limit @file`) |
+| `preflight_report.txt` | Full preflight check report |
+
+#### Multi-Cloud Preflight
+
+```bash
+# Check against each cloud provider's inventory
+ansible-playbook preflight_check.yml -i inventory.aws.yml
+ansible-playbook preflight_check.yml -i inventory.gcp.yml
+ansible-playbook preflight_check.yml -i inventory.oci.yml
+
+# Or check all combined
+ansible-playbook preflight_check.yml -i inventory.oci.yml -i inventory.aws.yml -i inventory.gcp.yml
+```
+
+### Targeting Specific Hosts
+
+Use the `--limit` option to filter hosts by name pattern. This is useful for targeting new nodes without affecting existing ones.
+
+```bash
+# Filter by instance name prefix (e.g., only nodes created on 2026-01-27)
+ansible-playbook site.yml --limit "instance20260127*"
+
+# Target only existing nodes (e.g., created on 2026-01-21)
+ansible-playbook site.yml --limit "instance20260121*"
+
+# Multiple patterns (OR logic)
+ansible-playbook site.yml --limit "instance20260127*:instance20260128*"
+
+# Exclude pattern (all EXCEPT matching hosts)
+ansible-playbook site.yml --limit "all:!instance20260121*"
+
+# Combine with tags
+ansible-playbook site.yml --tags discovery,precheck --limit "instance20260127*"
+
+# Dry run on specific hosts
+ansible-playbook site.yml --check --limit "instance20260127*"
+```
+
+**Common scenarios:**
+
+| Scenario | Command |
+|----------|---------|
+| Deploy to new nodes only | `ansible-playbook site.yml --limit "instance20260127*"` |
+| Precheck existing nodes | `ansible-playbook site.yml --tags precheck --limit "instance20260121*"` |
+| Skip problematic host | `ansible-playbook site.yml --limit "all:!instance20260127011850"` |
+| Single host test | `ansible-playbook site.yml --limit instance20260127011850` |
 
 ## Running Ansible
 
@@ -1297,6 +1662,82 @@ If file instances aren't being placed correctly:
 - SSH access with sudo privileges (or run locally with `ansible_connection: local`)
 - Required collections: `ansible.posix`, `community.general`
 - For API integration: Network access to Anvil management IP on port 8443
+
+### Cloud Provider Requirements
+
+| Provider | Collection | Python Dependencies | Authentication |
+|----------|------------|---------------------|----------------|
+| OCI | `oracle.oci` | `oci` | OCI CLI config (`~/.oci/config`) |
+| AWS | `amazon.aws` | `boto3`, `botocore` | AWS credentials (`~/.aws/credentials` or env vars) |
+| GCP | `google.cloud` | `google-auth`, `requests` | Service account or `gcloud auth` |
+
+**Install all collections:**
+```bash
+ansible-galaxy collection install -r requirements.yml
+```
+
+**Install Python dependencies:**
+```bash
+# For OCI
+pip3 install oci
+
+# For AWS
+pip3 install boto3 botocore
+
+# For GCP
+pip3 install google-auth requests
+```
+
+## Utility Scripts
+
+### cleanup_instance_nodes.py
+
+Removes nodes and their volumes from Hammerspace. Use before terminating instances.
+
+```bash
+# List all nodes
+python3 cleanup_instance_nodes.py --host <ANVIL_IP> --user admin --password 'xxx' --list-nodes
+
+# Delete nodes containing "bu-test" (dry run first)
+python3 cleanup_instance_nodes.py --host <ANVIL_IP> --user admin --password 'xxx' \
+  --contains "bu-test" --dry-run
+
+# Delete specific nodes
+python3 cleanup_instance_nodes.py --host <ANVIL_IP> --user admin --password 'xxx' \
+  --node bu-test-01 --node bu-test-02
+
+# Filter options: --prefix, --contains, --pattern (regex), --node (specific names)
+```
+
+### assign_az_to_volumes.py
+
+Assigns AZ prefixes to Hammerspace volumes based on OCI GPU memory fabric.
+
+```bash
+# Collect GPU fabric data first
+ansible-playbook collect_gpu_fabric.yml -i inventory.oci.yml
+
+# Assign AZ prefixes (dry run)
+python3 assign_az_to_volumes.py --host <ANVIL_IP> --user admin --password 'xxx' \
+  --gpu-fabric-file gpu_fabric_data.txt --dry-run
+
+# Apply AZ prefixes
+python3 assign_az_to_volumes.py --host <ANVIL_IP> --user admin --password 'xxx' \
+  --gpu-fabric-file gpu_fabric_data.txt
+```
+
+### collect_gpu_fabric.yml
+
+Collects GPU memory fabric OCIDs from OCI instances for AZ mapping.
+
+```bash
+ansible-playbook collect_gpu_fabric.yml -i inventory.oci.yml
+# Output: gpu_fabric_data.txt
+```
+
+## Customer Deployment Guide
+
+For step-by-step deployment instructions, see **[DEPLOYMENT_GUIDE.md](DEPLOYMENT_GUIDE.md)**.
 
 ## References
 

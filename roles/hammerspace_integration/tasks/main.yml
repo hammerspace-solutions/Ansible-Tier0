@@ -263,6 +263,6 @@
 
       Verify in Hammerspace GUI or CLI:
         anvil> node-list
-        anvil> storage-volume-list
+        anvil> volume-list
         anvil> share-list
       ============================================

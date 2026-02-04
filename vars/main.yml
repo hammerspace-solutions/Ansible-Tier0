@@ -192,7 +192,7 @@ cpu_optimized_raid: true
 # Reference: https://github.com/hammer-space/ansible
 
 # Anvil management IP (public IP for API access)
-hammerspace_api_host: "10.0.13.213"
+hammerspace_api_host: "10.0.10.15"
 
 # API credentials (admin role required)
 hammerspace_api_user: "admin"
@@ -234,29 +234,30 @@ hammerspace_volume_availability: 2
 hammerspace_volume_durability: 3
 
 # ============================================================================
-# Volume Naming and Configuration Options
+# Volume Naming and AZ Prefix Configuration
 # ============================================================================
 # AZ prefix for volume naming (format: "AZ1:" for multi-AZ deployments)
 # Volume name format: [az_prefix]node_name::path
-# Example with prefix: "FD1:tier0-node-01::/hammerspace/hsvol0"
+# Example with prefix: "AZ1:tier0-node-01::/hammerspace/hsvol0"
 # Example without prefix: "tier0-node-01::/hammerspace/hsvol0"
 #
-# Enable AZ prefix in volume names (default: false)
+# OCI Fault Domain Auto-Mapping:
+#   FAULT-DOMAIN-1 -> "AZ1:"
+#   FAULT-DOMAIN-2 -> "AZ2:"
+#   FAULT-DOMAIN-3 -> "AZ3:"
+#
+# Enable AZ prefix in volume names
 hammerspace_volume_az_prefix_enabled: false
 
-# Static AZ prefix (used when hammerspace_volume_az_prefix_enabled: true)
-# Set to empty string "" to disable prefix entirely
-# Set to a static value like "AZ1:" for all nodes
-# Set to "auto" to derive from OCI fault domain (requires OCI dynamic inventory)
-hammerspace_volume_az_prefix_mode: ""  # Options: "", "auto", or static value like "AZ1:"
+# AZ prefix mode (used when hammerspace_volume_az_prefix_enabled: true)
+# Options:
+#   ""      - No prefix (disabled)
+#   "auto"  - Derive from OCI fault domain (FAULT-DOMAIN-1 -> AZ1:)
+#   "AZ1:"  - Static prefix for all nodes
+hammerspace_volume_az_prefix_mode: ""
 
-# The actual prefix used in volume names (computed based on above settings)
-# - If hammerspace_volume_az_prefix_enabled is false: no prefix
-# - If hammerspace_volume_az_prefix_mode is "auto": derived from OCI fault domain
-# - Otherwise: uses the literal value of hammerspace_volume_az_prefix_mode
-#
-# You can also set this directly to override all above settings:
-# hammerspace_volume_az_prefix: "FD1:"
+# Direct override (ignores above settings if defined)
+# hammerspace_volume_az_prefix: "AZ1:"
 
 # Create placement objectives for volumes (recommended for automated tiering)
 hammerspace_create_placement_objectives: true
@@ -310,10 +311,11 @@ hammerspace_task_queue_delay: 10     # Delay between retries (seconds)
 # ============================================================================
 # Enable to parse AZ from node name (format: "AZ1:node-name")
 # Useful for multi-AZ deployments
+# Auto-detects AZ from OCI fault domain (FAULT-DOMAIN-1 -> AZ1, etc.)
 
 hammerspace_enable_az_mapping: false
 hammerspace_apply_az_labels: false
-hammerspace_default_az: "default"
+hammerspace_default_az: "AZ1"
 
 # Example: Set node name with AZ prefix
 # hammerspace_node_name: "AZ1:tier0-node-01"
@@ -448,7 +450,7 @@ nfs_rdma_port: 20049
 # Hammerspace Anvil/DSX node IPs (require no_root_squash)
 # These are your Hammerspace management nodes
 hammerspace_nodes:
-  - "10.0.13.213"  # Anvil cluster management IP
+  - "10.0.10.15"  # Anvil cluster management IP
   # Add additional Hammerspace node IPs as needed
 
 # Mover/DI node IPs - these need no_root_squash access
@@ -456,12 +458,11 @@ hammerspace_nodes:
 #   - DSX nodes (if used - they include mover functionality)
 #   - Standalone Linux servers running DI RPM or container
 mover_nodes:
-  - "10.0.0.93"  # Example: DSX node or standalone DI server
+  - "10.0.12.242"  # Example: DSX node or standalone DI server
 
 # Client subnets (use root_squash for security)
 client_subnets:
-  - "10.200.104.0/24"
-  - "10.200.105.0/24"
+  - "0.0.0.0/0"
 
 # Hammerspace recommended export options
 # For Hammerspace nodes: rw,no_root_squash,sync,secure,mp,no_subtree_check
@@ -631,12 +632,12 @@ iperf_test_targets: []
 # iperf test duration in seconds
 iperf_test_duration: 10
 
-# iperf test parallel streams (use 16+ for 200Gbps networks)
-iperf_test_parallel: 16
+# iperf test parallel streams (use 64 for 200Gbps networks)
+iperf_test_parallel: 64
 
 # Minimum expected bandwidth in Mbits/sec (warn if below this)
-# 200Gbps = 200000 Mbits/sec, set minimum to 180000 (90% threshold)
-iperf_min_bandwidth_mbps: 180000
+# 50Gbps = 50000 Mbits/sec, set minimum to 40000 (80% threshold)
+iperf_min_bandwidth_mbps: 40000
 
 # Fail playbook if bandwidth is below minimum
 iperf_enforce_bandwidth: false
