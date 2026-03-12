@@ -84,12 +84,13 @@
   register: volume_check_raw
   changed_when: false
   failed_when: false
+  check_mode: false
 
 - name: "Parse volume check result"
   ansible.builtin.set_fact:
     volume_check:
-      status: "{{ volume_check_raw.stdout_lines[-1] | default('0') | int }}"
-      json: "{{ (volume_check_raw.stdout_lines[:-1] | join('\n')) | default('{}', true) | from_json }}"
+      status: "{{ (volume_check_raw.stdout_lines | default(['0']))[-1] | default('0') | int }}"
+      json: "{{ ((volume_check_raw.stdout_lines | default(['{}']))[:-1] | join('\n') | trim | default('{}', true)) | from_json }}"
 
 - name: "Debug volume check result"
   ansible.builtin.debug:
@@ -115,27 +116,34 @@
       "{{ hs_api_url }}/storage-volumes?force=true"
   register: volume_add_raw
   changed_when: true
-  when: not volume_already_exists
+  when:
+    - not ansible_check_mode
+    - not volume_already_exists
 
 - name: "Extract location header from volume add response"
   ansible.builtin.shell: |
     grep -i '^Location:' /tmp/hs_volume_add_headers_{{ volume_name | hash('md5') }}.txt 2>/dev/null | awk '{print $2}' | tr -d '\r\n'
   register: volume_add_location_raw
   changed_when: false
-  when: not volume_already_exists
+  when:
+    - not ansible_check_mode
+    - not volume_already_exists
 
 - name: "Parse volume add result"
   ansible.builtin.set_fact:
     volume_add_result:
-      status: "{{ volume_add_raw.stdout_lines[-1] | default('0') | int }}"
-      json: "{{ (volume_add_raw.stdout_lines[:-1] | join('\n')) | default('{}', true) | from_json }}"
+      status: "{{ (volume_add_raw.stdout_lines | default(['0']))[-1] | default('0') | int }}"
+      json: "{{ ((volume_add_raw.stdout_lines | default(['{}']))[:-1] | join('\n') | trim | default('{}', true)) | from_json }}"
       location: "{{ volume_add_location_raw.stdout | default('') }}"
-  when: not volume_already_exists
+  when:
+    - not ansible_check_mode
+    - not volume_already_exists
 
 - name: "Check if add failed due to volume already existing"
   ansible.builtin.set_fact:
     volume_already_exists: true
   when:
+    - not ansible_check_mode
     - volume_add_result is defined
     - volume_add_result.status | default(0) | int == 400
     - "'already exists' in (volume_add_result.json | default({}) | string)"
@@ -153,6 +161,7 @@
   retries: 20
   delay: 5
   when:
+    - not ansible_check_mode
     - not volume_already_exists
     - volume_add_result is defined
     - volume_add_result.location | default('') | length > 0

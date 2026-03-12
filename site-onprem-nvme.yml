@@ -47,6 +47,7 @@
       register: hs_node_precheck_raw
       changed_when: false
       failed_when: false
+      check_mode: false
       when:
         - hammerspace_api_host is defined
         - hammerspace_api_user is defined
@@ -54,7 +55,7 @@
 
     - name: Set node_already_in_hammerspace fact
       ansible.builtin.set_fact:
-        node_already_in_hammerspace: "{{ (hs_node_precheck_raw.stdout_lines[-1] | default('404') | int) == 200 }}"
+        node_already_in_hammerspace: "{{ ((hs_node_precheck_raw.stdout_lines | default(['404']))[-1] | int) == 200 }}"
       when: hammerspace_api_host is defined
 
     - name: Display node registration status

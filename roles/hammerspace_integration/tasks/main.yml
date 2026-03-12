@@ -142,12 +142,13 @@
   register: node_check_raw
   changed_when: false
   failed_when: false
+  check_mode: false
 
 - name: Parse node check result
   ansible.builtin.set_fact:
     node_check:
-      status: "{{ node_check_raw.stdout_lines[-1] | int }}"
-      json: "{{ (node_check_raw.stdout_lines[:-1] | join('\n')) | default('{}', true) | from_json }}"
+      status: "{{ (node_check_raw.stdout_lines | default(['0']))[-1] | default('0') | int }}"
+      json: "{{ ((node_check_raw.stdout_lines | default(['{}']))[:-1] | join('\n') | trim | default('{}', true)) | from_json }}"
 
 - name: Add storage system to Hammerspace cluster
   ansible.builtin.command:
@@ -161,21 +162,27 @@
       "{{ hs_api_url }}/nodes?ip={{ hs_node_ip }}"
   register: node_add_raw
   changed_when: true
-  when: node_check.status | int == 404
+  when:
+    - not ansible_check_mode
+    - node_check.status | int == 404
 
 - name: Extract location header from node add response
   ansible.builtin.shell: |
     grep -i '^Location:' /tmp/hs_node_add_headers.txt 2>/dev/null | awk '{print $2}' | tr -d '\r\n'
   register: node_add_location_raw
   changed_when: false
-  when: node_check.status | int == 404
+  when:
+    - not ansible_check_mode
+    - node_check.status | int == 404
 
 - name: Parse node add result
   ansible.builtin.set_fact:
     node_add_result:
-      status: "{{ node_add_raw.stdout_lines[-1] | default('0') | int }}"
+      status: "{{ (node_add_raw.stdout_lines | default(['0']))[-1] | default('0') | int }}"
       location: "{{ node_add_location_raw.stdout | default('') }}"
-  when: node_check.status | int == 404
+  when:
+    - not ansible_check_mode
+    - node_check.status | int == 404
 
 - name: Wait for storage system add to complete
   ansible.builtin.command:
@@ -190,6 +197,7 @@
   retries: 30
   delay: 10
   when:
+    - not ansible_check_mode
     - node_add_result is defined
     - node_add_result.location | default('') | length > 0
 

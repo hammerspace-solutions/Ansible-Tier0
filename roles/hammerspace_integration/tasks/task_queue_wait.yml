@@ -13,11 +13,12 @@
   register: queued_tasks_raw
   changed_when: false
   failed_when: false
+  check_mode: false
 
 - name: "Parse queued tasks result"
   ansible.builtin.set_fact:
     queued_tasks_result:
-      json: "{{ queued_tasks_raw.stdout | default('[]') | from_json }}"
+      json: "{{ (queued_tasks_raw.stdout | default('') | trim | default('[]', true)) | from_json }}"
 
 - name: "Display current queue depth"
   ansible.builtin.debug:
@@ -33,10 +34,11 @@
       "{{ hs_api_url }}/tasks?spec=status%3Deq%3DQUEUED"
   register: task_queue_check_raw
   changed_when: false
-  until: (task_queue_check_raw.stdout | default('[]') | from_json | length) < (hammerspace_min_queued_tasks | default(5))
+  until: ((task_queue_check_raw.stdout | default('') | trim | default('[]', true)) | from_json | length) < (hammerspace_min_queued_tasks | default(5))
   retries: "{{ hammerspace_task_queue_retries | default(100) }}"
   delay: "{{ hammerspace_task_queue_delay | default(10) }}"
   when:
+    - not ansible_check_mode
     - hammerspace_task_queue_throttle | default(true)
     - queued_tasks_result.json is defined
     - (queued_tasks_result.json | length) > (hammerspace_max_queued_tasks | default(10))
@@ -51,12 +53,13 @@
   register: executing_tasks_raw
   changed_when: false
   failed_when: false
+  check_mode: false
   when: hammerspace_monitor_executing_tasks | default(false)
 
 - name: "Parse executing tasks result"
   ansible.builtin.set_fact:
     executing_tasks_result:
-      json: "{{ executing_tasks_raw.stdout | default('[]') | from_json }}"
+      json: "{{ (executing_tasks_raw.stdout | default('') | trim | default('[]', true)) | from_json }}"
   when: hammerspace_monitor_executing_tasks | default(false)
 
 - name: "Wait for executing tasks to complete"
@@ -68,10 +71,11 @@
       "{{ hs_api_url }}/tasks?spec=status%3Deq%3DEXECUTING"
   register: executing_check_raw
   changed_when: false
-  until: (executing_check_raw.stdout | default('[]') | from_json | length) < 1
+  until: ((executing_check_raw.stdout | default('') | trim | default('[]', true)) | from_json | length) < 1
   retries: "{{ hammerspace_task_queue_retries | default(100) }}"
   delay: "{{ hammerspace_task_queue_delay | default(10) }}"
   when:
+    - not ansible_check_mode
     - hammerspace_monitor_executing_tasks | default(false)
     - hammerspace_wait_for_executing | default(false)
     - executing_tasks_result.json is defined
