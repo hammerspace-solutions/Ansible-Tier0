@@ -75,7 +75,7 @@
   when: hammerspace_debug | default(false)
 
 - name: "Check if volume {{ volume_config.path }} already exists"
-  ansible.builtin.command:
+  ansible.builtin.shell:
     cmd: >-
       curl -s -o /dev/stdout -w "\n%{http_code}" --max-time 60
       {{ '' if (hammerspace_api_validate_certs | default(false)) else '-k' }}
@@ -105,7 +105,7 @@
     volume_already_exists: "{{ (volume_check.status | int) == 200 }}"
 
 - name: "Add storage volume {{ volume_config.path }}"
-  ansible.builtin.command:
+  ansible.builtin.shell:
     cmd: >-
       curl -s -o /dev/stdout -w "\n%{http_code}" --max-time 180
       {{ '' if (hammerspace_api_validate_certs | default(false)) else '-k' }}
@@ -149,7 +149,7 @@
     - "'already exists' in (volume_add_result.json | default({}) | string)"
 
 - name: "Wait for volume {{ volume_config.path }} add to complete"
-  ansible.builtin.command:
+  ansible.builtin.shell:
     cmd: >-
       curl -s --max-time 60
       {{ '' if (hammerspace_api_validate_certs | default(false)) else '-k' }}

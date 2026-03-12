@@ -133,7 +133,7 @@
       _type: "NODE"
 
 - name: Check if storage system already exists
-  ansible.builtin.command:
+  ansible.builtin.shell:
     cmd: >-
       curl -s -o /dev/stdout -w "\n%{http_code}" --max-time 60
       {{ '' if (hammerspace_api_validate_certs | default(false)) else '-k' }}
@@ -151,7 +151,7 @@
       json: "{{ ((node_check_raw.stdout_lines | default(['{}']))[:-1] | join('\n') | trim | default('{}', true)) | from_json }}"
 
 - name: Add storage system to Hammerspace cluster
-  ansible.builtin.command:
+  ansible.builtin.shell:
     cmd: >-
       curl -s -o /dev/stdout -w "\n%{http_code}" --max-time 180
       {{ '' if (hammerspace_api_validate_certs | default(false)) else '-k' }}
@@ -185,7 +185,7 @@
     - node_check.status | int == 404
 
 - name: Wait for storage system add to complete
-  ansible.builtin.command:
+  ansible.builtin.shell:
     cmd: >-
       curl -s --max-time 60
       {{ '' if (hammerspace_api_validate_certs | default(false)) else '-k' }}

@@ -4,7 +4,7 @@
 # Reference: hs_ops tasks_count.yml and tasks_executing_count.yml
 
 - name: "Check current QUEUED task count"
-  ansible.builtin.command:
+  ansible.builtin.shell:
     cmd: >-
       curl -s --max-time 60
       {{ '' if (hammerspace_api_validate_certs | default(false)) else '-k' }}
@@ -26,7 +26,7 @@
   when: hammerspace_debug | default(false)
 
 - name: "Wait for task queue to clear (threshold: {{ hammerspace_max_queued_tasks | default(10) }})"
-  ansible.builtin.command:
+  ansible.builtin.shell:
     cmd: >-
       curl -s --max-time 60
       {{ '' if (hammerspace_api_validate_certs | default(false)) else '-k' }}
@@ -44,7 +44,7 @@
     - (queued_tasks_result.json | length) > (hammerspace_max_queued_tasks | default(10))
 
 - name: "Check current EXECUTING task count"
-  ansible.builtin.command:
+  ansible.builtin.shell:
     cmd: >-
       curl -s --max-time 60
       {{ '' if (hammerspace_api_validate_certs | default(false)) else '-k' }}
@@ -63,7 +63,7 @@
   when: hammerspace_monitor_executing_tasks | default(false)
 
 - name: "Wait for executing tasks to complete"
-  ansible.builtin.command:
+  ansible.builtin.shell:
     cmd: >-
       curl -s --max-time 60
       {{ '' if (hammerspace_api_validate_certs | default(false)) else '-k' }}

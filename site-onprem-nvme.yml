@@ -38,7 +38,7 @@
 
     # Check if node is already registered in Hammerspace (to skip NFS restart)
     - name: Check if node already exists in Hammerspace
-      ansible.builtin.command:
+      ansible.builtin.shell:
         cmd: >-
           curl -s -o /dev/stdout -w "\n%{http_code}" --max-time 30
           {{ '' if (hammerspace_api_validate_certs | default(false)) else '-k' }}
