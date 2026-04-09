@@ -23,6 +23,34 @@
     msg: "Storage type: {{ storage_type | default('nvme') }}"
 
 # ============================================================================
+# Rescan Storage Controllers
+# Ensures hot-added or virtual drives (e.g. VMware NVMe) are visible to the OS
+# ============================================================================
+- name: Rescan NVMe controllers
+  ansible.builtin.shell: |
+    for ctrl in /sys/class/nvme/nvme*; do
+      if [ -e "$ctrl/rescan_controller" ]; then
+        echo 1 > "$ctrl/rescan_controller"
+      fi
+    done
+    udevadm settle --timeout=10
+  changed_when: false
+  failed_when: false
+  when: storage_type | default('nvme') in ['nvme', 'all']
+
+- name: Rescan SCSI bus
+  ansible.builtin.shell: |
+    for host in /sys/class/scsi_host/host*; do
+      if [ -d "$host" ]; then
+        echo "- - -" > "$host/scan"
+      fi
+    done
+    udevadm settle --timeout=10
+  changed_when: false
+  failed_when: false
+  when: storage_type | default('nvme') in ['hdd', 'ssd', 'scsi', 'all']
+
+# ============================================================================
 # Hardware RAID Mode - Skip discovery, use pre-defined HW RAID devices
 # ============================================================================
 - name: Handle hardware RAID devices (skip software RAID)
