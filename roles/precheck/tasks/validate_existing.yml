@@ -2,19 +2,22 @@
 # Existing Configuration Checks
 # Detects pre-existing mdadm and NFS configurations
 
-- name: Check for existing mdadm configuration
-  ansible.builtin.stat:
-    path: /etc/mdadm/mdadm.conf
-  register: mdadm_conf
+- name: Check for existing RAID arrays
+  ansible.builtin.command: mdadm --detail --scan
+  register: mdadm_scan
+  changed_when: false
+  failed_when: false
   when: not _precheck_hw_raid
 
-- name: Display existing mdadm configuration status
+- name: Display existing RAID configuration
   ansible.builtin.debug:
-    msg: "Existing mdadm.conf found at /etc/mdadm/mdadm.conf - will be updated"
+    msg: |
+      Existing RAID arrays detected:
+      {{ mdadm_scan.stdout }}
   when:
     - not _precheck_hw_raid
-    - mdadm_conf.stat is defined
-    - mdadm_conf.stat.exists
+    - mdadm_scan.rc == 0
+    - mdadm_scan.stdout | default('') | length > 0
 
 - name: Check current NFS exports
   ansible.builtin.command: exportfs -v
