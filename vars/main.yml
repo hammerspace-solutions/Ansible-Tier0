@@ -390,15 +390,19 @@ hammerspace_task_queue_delay: 10     # Delay between retries (seconds)
 # Timeouts for async Hammerspace API operations
 # Each operation polls until complete or max retries reached
 
-# curl per-request timeout (seconds)
+# curl per-request timeout (seconds) — used for GET/POST calls
 # hammerspace_api_curl_timeout: 60
+
+# Volume add POST timeout (seconds) — volume adds can take 15-20+ minutes
+# on busy clusters; default 1800s = 30 min to avoid curl timeout (rc:28)
+# hammerspace_api_volume_add_timeout: 1800
 
 # Node add: retries * delay = max wait (default: 30 * 10 = 300s = 5 min)
 # hammerspace_node_add_retries: 30
 # hammerspace_node_add_delay: 10
 
-# Volume add: retries * delay = max wait (default: 40 * 10 = 400s = ~7 min)
-# hammerspace_volume_add_retries: 40
+# Volume add polling: retries * delay = max wait (default: 180 * 10 = 1800s = 30 min)
+# hammerspace_volume_add_retries: 180
 # hammerspace_volume_add_delay: 10
 
 # RAID sync wait: retries * delay = max wait (default: 60 * 30 = 1800s = 30 min)
