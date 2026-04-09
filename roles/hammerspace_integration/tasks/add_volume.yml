@@ -107,7 +107,7 @@
 - name: "Add storage volume {{ volume_config.path }}"
   ansible.builtin.shell:
     cmd: >-
-      curl -s -o /dev/stdout -w "\n%{http_code}" --max-time 180
+      curl -s -o /dev/stdout -w "\n%{http_code}" --max-time {{ hammerspace_api_volume_add_timeout | default(1800) }}
       {{ '' if (hammerspace_api_validate_certs | default(false)) else '-k' }}
       -u "{{ hammerspace_api_user }}:{{ hammerspace_api_password }}"
       -X POST -H "Content-Type: application/json"
@@ -158,7 +158,7 @@
   register: volume_add_status_raw
   changed_when: false
   until: (volume_add_status_raw.stdout | default('{}') | from_json).status | default('') in ["COMPLETED", "FAILED", "CANCELLED"]
-  retries: "{{ hammerspace_volume_add_retries | default(40) }}"
+  retries: "{{ hammerspace_volume_add_retries | default(180) }}"
   delay: "{{ hammerspace_volume_add_delay | default(10) }}"
   when:
     - not ansible_check_mode
