@@ -27,36 +27,40 @@
 # Ensures hot-added or virtual drives (e.g. VMware NVMe) are visible to the OS
 # ============================================================================
 - name: Rescan NVMe controllers
-  ansible.builtin.shell: |
-    rescanned=0
-    # Try per-controller rescan first (works on bare metal)
-    for ctrl in /sys/class/nvme/nvme[0-9]*; do
-      if [ -e "$ctrl/rescan_controller" ]; then
-        echo 1 > "$ctrl/rescan_controller"
-        rescanned=1
-      fi
-    done
-    # Fallback: PCI bus rescan for VMware virtual NVMe and hot-added controllers
-    # This picks up controllers that don't expose rescan_controller
-    if [ "$rescanned" -eq 0 ] || [ -e /sys/devices/virtual/dmi/id/sys_vendor ] && grep -qi vmware /sys/devices/virtual/dmi/id/sys_vendor 2>/dev/null; then
-      echo 1 > /sys/bus/pci/rescan 2>/dev/null || true
-    fi
-    udevadm settle --timeout=10
+  ansible.builtin.shell:
+    cmd: |
+      for ctrl in /sys/class/nvme/nvme[0-9]*; do
+        if [ -e "$ctrl/rescan_controller" ]; then
+          echo 1 > "$ctrl/rescan_controller"
+        fi
+      done
+  changed_when: false
+  failed_when: false
+  when: storage_type | default('nvme') in ['nvme', 'all']
+
+- name: Rescan PCI bus for VMware virtual NVMe
+  ansible.builtin.shell:
+    cmd: echo 1 > /sys/bus/pci/rescan
   changed_when: false
   failed_when: false
   when: storage_type | default('nvme') in ['nvme', 'all']
 
 - name: Rescan SCSI bus
-  ansible.builtin.shell: |
-    for host in /sys/class/scsi_host/host[0-9]*; do
-      if [ -d "$host" ]; then
-        echo "- - -" > "$host/scan"
-      fi
-    done
-    udevadm settle --timeout=10
+  ansible.builtin.shell:
+    cmd: |
+      for host in /sys/class/scsi_host/host[0-9]*; do
+        if [ -d "$host" ]; then
+          echo "- - -" > "$host/scan"
+        fi
+      done
   changed_when: false
   failed_when: false
   when: storage_type | default('nvme') in ['hdd', 'ssd', 'scsi', 'all']
+
+- name: Wait for device nodes to settle after rescan
+  ansible.builtin.command: udevadm settle --timeout=10
+  changed_when: false
+  failed_when: false
 
 # ============================================================================
 # Hardware RAID Mode - Skip discovery, use pre-defined HW RAID devices
@@ -190,41 +194,38 @@
     - storage_type | default('nvme') in ['nvme', 'all']
   block:
     - name: Discover all NVMe devices with NUMA node, serial, model, and PCIe address
-      ansible.builtin.shell: |
-        found_devices=0
-        # Primary: sysfs enumeration — discover all namespaces per controller
-        for nvme in /sys/class/nvme/nvme[0-9]*; do
-          if [ -d "$nvme" ]; then
-            ctrl_name=$(basename "$nvme")
-            numa=$(cat "$nvme/device/numa_node" 2>/dev/null || echo "-1")
-            serial=$(cat "$nvme/serial" 2>/dev/null | xargs || echo "unknown")
-            model=$(cat "$nvme/model" 2>/dev/null | xargs || echo "unknown")
-            pcie=$(cat "$nvme/address" 2>/dev/null | xargs || echo "unknown")
-            # Discover all namespaces (not just n1) — VMware may use different numbering
-            for ns in /dev/${ctrl_name}n[0-9]*; do
-              # Skip partition devices (e.g. nvme0n1p1)
-              case "$ns" in *p[0-9]*) continue ;; esac
-              if [ -b "$ns" ]; then
-                ns_name=$(basename "$ns" | sed "s/${ctrl_name}//")
-                echo "${ctrl_name}${ns_name}:${numa}:${serial}:${model}:${pcie}"
-                found_devices=1
+      ansible.builtin.shell:
+        cmd: |
+          found_devices=0
+          for nvme in /sys/class/nvme/nvme[0-9]*; do
+            if [ -d "$nvme" ]; then
+              ctrl_name=$(basename "$nvme")
+              numa=$(cat "$nvme/device/numa_node" 2>/dev/null || echo "-1")
+              serial=$(cat "$nvme/serial" 2>/dev/null | xargs || echo "unknown")
+              model=$(cat "$nvme/model" 2>/dev/null | xargs || echo "unknown")
+              pcie=$(cat "$nvme/address" 2>/dev/null | xargs || echo "unknown")
+              for ns in /dev/${ctrl_name}n[0-9]*; do
+                case "$ns" in *p[0-9]*) continue ;; esac
+                if [ -b "$ns" ]; then
+                  ns_name=$(basename "$ns" | sed "s/${ctrl_name}//")
+                  echo "${ctrl_name}${ns_name}:${numa}:${serial}:${model}:${pcie}"
+                  found_devices=1
+                fi
+              done
+            fi
+          done
+          if [ "$found_devices" -eq 0 ]; then
+            lsblk -d -n -o NAME,TRAN 2>/dev/null | awk '$2 == "nvme" {print $1}' | while read dev; do
+              ctrl=$(echo "$dev" | sed 's/n[0-9]*$//')
+              numa=$(cat "/sys/class/nvme/${ctrl}/device/numa_node" 2>/dev/null || echo "-1")
+              serial=$(cat "/sys/class/nvme/${ctrl}/serial" 2>/dev/null | xargs || echo "unknown")
+              model=$(cat "/sys/class/nvme/${ctrl}/model" 2>/dev/null | xargs || echo "unknown")
+              pcie=$(cat "/sys/class/nvme/${ctrl}/address" 2>/dev/null | xargs || echo "unknown")
+              if [ -b "/dev/$dev" ]; then
+                echo "${dev}:${numa}:${serial}:${model}:${pcie}"
               fi
             done
           fi
-        done
-        # Fallback: use lsblk if sysfs found nothing (VMware hot-add edge case)
-        if [ "$found_devices" -eq 0 ]; then
-          lsblk -d -n -o NAME,TRAN 2>/dev/null | awk '$2 == "nvme" {print $1}' | while read dev; do
-            ctrl=$(echo "$dev" | sed 's/n[0-9]*$//')
-            numa=$(cat "/sys/class/nvme/${ctrl}/device/numa_node" 2>/dev/null || echo "-1")
-            serial=$(cat "/sys/class/nvme/${ctrl}/serial" 2>/dev/null | xargs || echo "unknown")
-            model=$(cat "/sys/class/nvme/${ctrl}/model" 2>/dev/null | xargs || echo "unknown")
-            pcie=$(cat "/sys/class/nvme/${ctrl}/address" 2>/dev/null | xargs || echo "unknown")
-            if [ -b "/dev/$dev" ]; then
-              echo "${dev}:${numa}:${serial}:${model}:${pcie}"
-            fi
-          done
-        fi
       register: nvme_numa_raw
       changed_when: false
 
@@ -327,23 +328,23 @@
     - storage_type | default('nvme') in ['hdd', 'ssd', 'scsi', 'all']
   block:
     - name: Discover all SCSI/SATA block devices with NUMA, serial, model, and rotational flag
-      ansible.builtin.shell: |
-        for dev in /sys/block/sd*; do
-          if [ -d "$dev" ]; then
-            name=$(basename "$dev")
-            size=$(cat "$dev/size" 2>/dev/null || echo "0")
-            # Skip zero-size devices
-            if [ "$size" = "0" ] || [ ! -b "/dev/$name" ]; then
-              continue
+      ansible.builtin.shell:
+        cmd: |
+          for dev in /sys/block/sd*; do
+            if [ -d "$dev" ]; then
+              name=$(basename "$dev")
+              size=$(cat "$dev/size" 2>/dev/null || echo "0")
+              if [ "$size" = "0" ] || [ ! -b "/dev/$name" ]; then
+                continue
+              fi
+              rota=$(cat "$dev/queue/rotational" 2>/dev/null || echo "1")
+              numa=$(cat "$dev/device/numa_node" 2>/dev/null || echo "-1")
+              serial=$(udevadm info --query=property --name="/dev/$name" 2>/dev/null | grep -m1 'ID_SERIAL_SHORT=' | cut -d= -f2 || echo "unknown")
+              if [ -z "$serial" ]; then serial="unknown"; fi
+              model=$(cat "$dev/device/model" 2>/dev/null | xargs || echo "unknown")
+              echo "${name}:${numa}:${serial}:${model}:${rota}"
             fi
-            rota=$(cat "$dev/queue/rotational" 2>/dev/null || echo "1")
-            numa=$(cat "$dev/device/numa_node" 2>/dev/null || echo "-1")
-            serial=$(udevadm info --query=property --name="/dev/$name" 2>/dev/null | grep -m1 'ID_SERIAL_SHORT=' | cut -d= -f2 || echo "unknown")
-            if [ -z "$serial" ]; then serial="unknown"; fi
-            model=$(cat "$dev/device/model" 2>/dev/null | xargs || echo "unknown")
-            echo "${name}:${numa}:${serial}:${model}:${rota}"
-          fi
-        done
+          done
       register: scsi_raw
       changed_when: false
 
