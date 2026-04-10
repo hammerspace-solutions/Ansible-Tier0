@@ -468,6 +468,13 @@
 # ============================================================================
 # Build RAID Arrays (with sizing options)
 # ============================================================================
+- name: Force per_drive strategy when use_raid is false
+  ansible.builtin.set_fact:
+    raid_grouping_strategy: per_drive
+  when:
+    - not _hw_raid_mode
+    - not (use_raid | default(true))
+
 - name: Include RAID array building tasks
   ansible.builtin.include_tasks: build_raid_arrays.yml
   when: not _hw_raid_mode
