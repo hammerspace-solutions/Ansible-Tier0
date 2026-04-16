@@ -20,8 +20,8 @@
 
       {%- elif (hammerspace_volume_az_prefix_mode | default('')) == 'auto' -%}
         {{ oci_fault_domain | default('') | regex_replace('FAULT-DOMAIN-', 'AZ') }}{{ ':' if oci_fault_domain is defined and oci_fault_domain else '' }}
-      {%- elif group_names | default([]) | select('match', '^AZ\\d+$') | list | length > 0 -%}
-        {{ group_names | select('match', '^AZ\\d+$') | first }}:
+      {%- elif group_names | default([]) | select('match', '^AZ[0-9]+$') | list | length > 0 -%}
+        {{ (group_names | default([]) | select('match', '^AZ[0-9]+$') | list)[0] ~ ':' }}
       {%- else -%}
         {{ hammerspace_volume_az_prefix_mode | default('') }}
       {%- endif -%}
@@ -52,7 +52,6 @@
           - address: "{{ hammerspace_node_ip | default(ansible_default_ipv4.address) }}"
             prefixLength: 32
         createPlacementObjectives: "{{ hammerspace_create_placement_objectives | default(true) }}"
-        skipPerfTest: "{{ hammerspace_skip_performance_test | default(true) }}"
         isSharedChecked: true
         isReadOnlyChecked: false
       node:
@@ -115,7 +114,7 @@
       -X POST -H "Content-Type: application/json"
       -D /tmp/hs_volume_add_headers_{{ volume_name | hash('md5') }}.txt
       -d '{{ volume_payload | to_json }}'
-      "{{ hs_api_url }}/storage-volumes?force=true"
+      "{{ hs_api_url }}/storage-volumes?force=true&skipPerfTest={{ hammerspace_skip_performance_test | default(true) | lower }}"
   register: volume_add_raw
   changed_when: true
   when:

@@ -19,8 +19,8 @@
         {{ oci_fault_domain | regex_replace('FAULT-DOMAIN-', 'AZ') }}
       {%- elif ':' in hs_node_name -%}
         {{ hs_node_name.split(':')[0] }}
-      {%- elif group_names | default([]) | select('match', '^AZ\\d+$') | list | length > 0 -%}
-        {{ group_names | select('match', '^AZ\\d+$') | first }}
+      {%- elif group_names | default([]) | select('match', '^AZ[0-9]+$') | list | length > 0 -%}
+        {{ (group_names | default([]) | select('match', '^AZ[0-9]+$') | list)[0] }}
       {%- else -%}
         {{ hammerspace_default_az | default('default') }}
       {%- endif -%}
