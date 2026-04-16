@@ -111,8 +111,12 @@
       tags: [firewall]
 
     # Hammerspace cluster integration via API
+    # Runs inline (parallel across hosts) when hammerspace_serial is 0 (default)
+    # When hammerspace_serial > 0, integration runs in a separate serialized play below
     - role: hammerspace_integration
-      when: hammerspace_api_host is defined
+      when:
+        - hammerspace_api_host is defined
+        - (hammerspace_serial | default(0) | int) == 0
       tags: [hammerspace, integration]
 
   post_tasks:
@@ -190,3 +194,34 @@
              {% endfor %}
           {% endif %}
           ============================================
+
+# =============================================================================
+# Serialized Hammerspace Integration (Option A: serial play)
+# =============================================================================
+# When hammerspace_serial > 0, this separate play processes N nodes at a time
+# for Hammerspace API integration. This prevents overwhelming Anvil with
+# concurrent node registrations and volume adds (e.g., 10+ nodes x 4 volumes).
+#
+# Usage:
+#   vars/main.yml:  hammerspace_serial: 2    (process 2 nodes at a time)
+#   or command line: -e hammerspace_serial=2
+#
+# When hammerspace_serial is 0 (default), this play is skipped and integration
+# runs inline in the play above (all hosts in parallel, original behavior).
+
+- name: Hammerspace Integration (serialized)
+  hosts: storage_servers
+  become: true
+  gather_facts: false
+  serial: "{{ hammerspace_serial | default(0) }}"
+
+  vars_files:
+    - vars/main.yml
+    - vars/vault.yml
+
+  roles:
+    - role: hammerspace_integration
+      when:
+        - hammerspace_api_host is defined
+        - (hammerspace_serial | default(0) | int) > 0
+      tags: [hammerspace, integration]
