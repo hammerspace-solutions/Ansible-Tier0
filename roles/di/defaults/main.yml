@@ -1,0 +1,15 @@
+---
+# Default variables for the DI role
+
+# Firewall defaults
+flush_iptables: true
+enable_ufw: false
+
+di_firewall_ports:
+  - port: 9095
+    proto: tcp
+  - port: 9096
+    proto: tcp
+
+# Container defaults
+di_container_systemd_flag: "{{ '--systemd=always' if di_container_runtime == 'podman' else '' }}"

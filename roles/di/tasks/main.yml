@@ -1,0 +1,127 @@
+---
+# Data Instantiator (DI / NFS Mover) - Consolidated Role
+#
+# Orchestrates DI deployment on target nodes. Called from site.yml
+# when deploy_di is true (targets di_nodes group).
+#
+# Supports two modes:
+#   di_deployment_type: "host"      - Native RPM install
+#   di_deployment_type: "container" - Build & run in podman/docker
+#
+# Activation control:
+#   di_activate: true  (default) - Install, start services, and register with cluster
+#   di_activate: false            - Install and configure only; do NOT start pd-di
+#                                   or register with the cluster. Use this to pre-stage
+#                                   DI on nodes and activate later with:
+#                                     ansible-playbook site.yml --tags di-activate -e deploy_di=true
+
+# Load OS-specific variables (packages, extensions)
+- name: Include OS-specific variables
+  ansible.builtin.include_vars: "{{ ansible_os_family | lower }}.yml"
+
+- name: Display DI activation mode
+  ansible.builtin.debug:
+    msg: >-
+      DI activation: {{ 'ACTIVE — will start services and register'
+      if (di_activate | default(true) | bool)
+      else 'PRE-DEPLOY ONLY — install and configure, skip services and registration' }}
+
+# =============================================================================
+# Common prechecks (both modes)
+# =============================================================================
+
+- name: Run DI prechecks
+  ansible.builtin.include_tasks: precheck.yml
+  tags: [di, di-precheck]
+
+# =============================================================================
+# Host-mode install path
+# =============================================================================
+
+- name: Install DI dependencies
+  ansible.builtin.include_tasks: dependencies.yml
+  when: di_deployment_type == 'host'
+  tags: [di, di-dependencies]
+
+- name: Install pd-di package
+  ansible.builtin.include_tasks: install.yml
+  when: di_deployment_type == 'host'
+  tags: [di, di-install]
+
+# =============================================================================
+# SELinux + firewall (both modes)
+# Container mode still needs these on the host: privileged containers
+# inherit SELinux enforcement, and host networking means host firewall
+# gates ports 9095/9096.
+# =============================================================================
+
+- name: Configure SELinux for DI
+  ansible.builtin.include_tasks: selinux.yml
+  tags: [di, di-selinux]
+
+- name: Configure firewall for DI
+  ansible.builtin.include_tasks: firewall.yml
+  tags: [di, di-firewall]
+
+# =============================================================================
+# Host-mode services + registration (skipped when di_activate is false)
+# =============================================================================
+
+- name: Start DI services
+  ansible.builtin.include_tasks: services.yml
+  when:
+    - di_deployment_type == 'host'
+    - di_activate | default(true) | bool
+  tags: [di, di-services, di-activate]
+
+- name: Register DI node with Hammerspace
+  ansible.builtin.include_tasks: register.yml
+  when:
+    - di_deployment_type == 'host'
+    - di_activate | default(true) | bool
+  tags: [di, di-register, di-activate]
+
+# =============================================================================
+# Container-mode path
+# =============================================================================
+
+- name: Install container runtime
+  ansible.builtin.include_tasks: container_runtime.yml
+  when: di_deployment_type == 'container'
+  tags: [di, di-container]
+
+- name: Build DI container image (pre-deploy — no start)
+  ansible.builtin.include_tasks: container_build.yml
+  when:
+    - di_deployment_type == 'container'
+    - not (di_activate | default(true) | bool)
+  tags: [di, di-container]
+
+- name: Build, deploy, and register DI container
+  ansible.builtin.include_tasks: container_deploy.yml
+  when:
+    - di_deployment_type == 'container'
+    - di_activate | default(true) | bool
+  tags: [di, di-container, di-activate]
+
+# =============================================================================
+# Pre-deploy summary (when di_activate is false)
+# =============================================================================
+
+- name: Display pre-deploy status
+  ansible.builtin.debug:
+    msg: |
+      ============================================
+      DI PRE-DEPLOYED (not activated)
+      ============================================
+      Node: {{ di_node_name | default(inventory_hostname) }}
+      Mode: {{ di_deployment_type }}
+      pd-di is installed but services are NOT started
+      and node is NOT registered with Hammerspace.
+
+      To activate later:
+        ansible-playbook site.yml --tags di-activate \
+          -e deploy_di=true -e di_activate=true \
+          --limit {{ inventory_hostname }}
+      ============================================
+  when: not (di_activate | default(true) | bool)

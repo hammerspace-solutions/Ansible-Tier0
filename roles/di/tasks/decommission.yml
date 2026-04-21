@@ -1,0 +1,130 @@
+---
+# DI Decommission role - Remove DI node from Hammerspace cluster
+# Steps: list volumes -> decommission volumes -> remove volumes -> remove node -> stop services
+
+- name: Set DI node facts
+  ansible.builtin.set_fact:
+    _di_node_name: "{{ di_node_name | default(inventory_hostname) }}"
+    _di_node_ip: "{{ di_node_ip | default(ansible_default_ipv4.address | default('')) }}"
+    _hs_api_base: "https://{{ hammerspace_api_host }}:{{ hammerspace_api_port | default(8443) }}/mgmt/v1.2/rest"
+
+# Detect whether to use curl or uri module
+- name: Check Python version for uri module compatibility
+  ansible.builtin.command:
+    cmd: python3 -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')"
+  register: python_version_check
+  changed_when: false
+  failed_when: false
+  delegate_to: localhost
+
+- name: Set curl usage flag
+  ansible.builtin.set_fact:
+    _hs_use_curl: "{{ (python_version_check.stdout | default('3.9') is version('3.13', '>=')) }}"
+
+# Check if node exists
+- name: Check if DI node exists in Hammerspace
+  ansible.builtin.include_tasks: _api_request.yml
+  vars:
+    _api_request_url: "{{ _hs_api_base }}/nodes/{{ _di_node_name | urlencode }}"
+    _api_request_method: GET
+
+- name: Set node existence fact
+  ansible.builtin.set_fact:
+    _di_node_registered: "{{ (_api_response.status | int) == 200 }}"
+
+- name: Skip decommission if node not registered
+  ansible.builtin.debug:
+    msg: "DI node '{{ _di_node_name }}' is not registered in Hammerspace - nothing to decommission"
+  when: not (_di_node_registered | bool)
+
+# Decommission workflow
+- name: Decommission DI node
+  when: _di_node_registered | bool
+  block:
+    # List all volumes and find ones belonging to this node
+    - name: List all volumes
+      ansible.builtin.include_tasks: _api_request.yml
+      vars:
+        _api_request_url: "{{ _hs_api_base }}/volumes"
+        _api_request_method: GET
+
+    - name: Find volumes for this node
+      ansible.builtin.set_fact:
+        _node_volumes: >-
+          {{ _api_response.json | default([]) |
+             selectattr('node.name', 'defined') |
+             selectattr('node.name', 'equalto', _di_node_name) | list
+             +
+             _api_response.json | default([]) |
+             selectattr('name', 'defined') |
+             selectattr('name', 'search', _di_node_name ~ '::') | list
+          }}
+
+    - name: Remove duplicate volumes
+      ansible.builtin.set_fact:
+        _node_volumes: "{{ _node_volumes | unique }}"
+
+    - name: Display volumes found
+      ansible.builtin.debug:
+        msg: "Found {{ _node_volumes | length }} volume(s) for node '{{ _di_node_name }}': {{ _node_volumes | map(attribute='name') | list }}"
+
+    # Decommission each volume
+    - name: Decommission volumes
+      ansible.builtin.include_tasks: decommission_volume.yml
+      loop: "{{ _node_volumes }}"
+      loop_control:
+        loop_var: _volume
+        label: "{{ _volume.name }}"
+      when: _node_volumes | length > 0
+
+    # Remove node from Hammerspace
+    - name: Remove DI node from Hammerspace
+      ansible.builtin.include_tasks: _api_request.yml
+      vars:
+        _api_request_url: "{{ _hs_api_base }}/nodes/{{ _di_node_name | urlencode }}"
+        _api_request_method: DELETE
+        _api_request_save_headers: true
+
+    - name: Check node removal result
+      ansible.builtin.debug:
+        msg: >-
+          Node removal: {{ 'success' if (_api_response.status | int) in [200, 202, 204]
+          else 'failed with status ' ~ _api_response.status }}
+
+    # Poll for node removal task completion if async
+    - name: Poll node removal task
+      ansible.builtin.include_tasks: _api_poll_task.yml
+      vars:
+        _api_poll_url: "{{ _api_response.location }}"
+        _api_poll_retries: "{{ di_decommission_poll_retries | default(30) }}"
+        _api_poll_delay: "{{ di_decommission_poll_delay | default(10) }}"
+      when: _api_response.location | default('') | length > 0
+
+# Stop services
+- name: Stop DI services
+  when: di_decommission_stop_services | default(true)
+  block:
+    - name: Stop pd-di service
+      ansible.builtin.systemd:
+        name: pd-di
+        state: stopped
+        enabled: false
+      failed_when: false
+
+    - name: Stop pd-di-lttng-recorder service
+      ansible.builtin.systemd:
+        name: pd-di-lttng-recorder
+        state: stopped
+        enabled: false
+      failed_when: false
+
+    - name: Stop lttng-sessiond service
+      ansible.builtin.systemd:
+        name: lttng-sessiond
+        state: stopped
+        enabled: false
+      failed_when: false
+
+    - name: Display service stop status
+      ansible.builtin.debug:
+        msg: "DI services stopped and disabled"

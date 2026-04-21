@@ -1,0 +1,22 @@
+---
+# Install the chosen container runtime on the target host.
+
+- name: Validate di_container_runtime
+  ansible.builtin.fail:
+    msg: >-
+      di_container_runtime='{{ di_container_runtime }}' is not supported.
+      Use 'podman' or 'docker'.
+  when: di_container_runtime not in ['podman', 'docker']
+
+- name: Install runtime-specific tasks
+  ansible.builtin.include_tasks: "container_runtime_{{ di_container_runtime }}.yml"
+
+- name: Verify {{ di_container_runtime }} is usable
+  ansible.builtin.command:
+    cmd: "{{ di_container_runtime }} --version"
+  register: runtime_version
+  changed_when: false
+
+- name: Display container runtime version
+  ansible.builtin.debug:
+    msg: "{{ runtime_version.stdout }}"

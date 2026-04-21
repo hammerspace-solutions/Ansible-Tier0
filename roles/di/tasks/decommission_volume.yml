@@ -1,0 +1,57 @@
+---
+# Decommission a single volume: decommission -> poll -> remove -> poll
+
+- name: "Decommission volume '{{ _volume.name }}'"
+  ansible.builtin.include_tasks: _api_request.yml
+  vars:
+    _api_request_url: "{{ _hs_api_base }}/volumes/{{ _volume.name | urlencode }}/decommission"
+    _api_request_method: POST
+    _api_request_body:
+      evacuateData: "{{ di_decommission_evacuate_data | default(true) }}"
+    _api_request_save_headers: true
+    _api_request_timeout: 180
+
+- name: "Check decommission result for '{{ _volume.name }}'"
+  ansible.builtin.debug:
+    msg: "Volume decommission status: {{ _api_response.status }}"
+
+# Poll decommission task
+- name: "Poll decommission task for '{{ _volume.name }}'"
+  ansible.builtin.include_tasks: _api_poll_task.yml
+  vars:
+    _api_poll_url: "{{ _api_response.location }}"
+    _api_poll_retries: "{{ di_decommission_poll_retries | default(180) }}"
+    _api_poll_delay: "{{ di_decommission_poll_delay | default(10) }}"
+  when: _api_response.location | default('') | length > 0
+
+- name: "Check decommission task result for '{{ _volume.name }}'"
+  ansible.builtin.fail:
+    msg: "Volume decommission task failed for '{{ _volume.name }}': {{ _api_poll_result.task_status | default('UNKNOWN') }}"
+  when:
+    - _api_poll_result is defined
+    - _api_poll_result.task_status | default('') in ["FAILED", "CANCELLED"]
+
+# Remove volume
+- name: "Remove volume '{{ _volume.name }}'"
+  ansible.builtin.include_tasks: _api_request.yml
+  vars:
+    _api_request_url: "{{ _hs_api_base }}/volumes/{{ _volume.name | urlencode }}"
+    _api_request_method: DELETE
+    _api_request_save_headers: true
+
+- name: "Check volume removal result for '{{ _volume.name }}'"
+  ansible.builtin.debug:
+    msg: "Volume removal status: {{ _api_response.status }}"
+
+# Poll removal task
+- name: "Poll removal task for '{{ _volume.name }}'"
+  ansible.builtin.include_tasks: _api_poll_task.yml
+  vars:
+    _api_poll_url: "{{ _api_response.location }}"
+    _api_poll_retries: "{{ di_decommission_poll_retries | default(180) }}"
+    _api_poll_delay: "{{ di_decommission_poll_delay | default(10) }}"
+  when: _api_response.location | default('') | length > 0
+
+- name: "Verify volume '{{ _volume.name }}' removed"
+  ansible.builtin.debug:
+    msg: "Volume '{{ _volume.name }}' removed successfully"
