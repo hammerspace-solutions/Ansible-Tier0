@@ -1,0 +1,46 @@
+# Hammerspace DI container image.
+# Base OS stays el9 because the pd-di RPMs are el9-only.
+# Built by roles/container_deploy — do not invoke directly.
+
+ARG BASE_IMAGE=rockylinux:9
+FROM ${BASE_IMAGE}
+
+ENV container=docker
+
+# Core system + network utilities + python bindings used by add_node.py
+RUN dnf -y install epel-release && \
+    dnf -y install \
+        bash bash-completion \
+        procps-ng util-linux findutils \
+        less vim-minimal which \
+        iproute net-tools iputils bind-utils \
+        ca-certificates \
+        python3-pip python3-urllib3 python3-requests \
+        systemd && \
+    dnf clean all && \
+    find /etc/systemd/system /lib/systemd/system -path '*.wants/*' \
+        \( -name '*getty*' -o -name '*udev*' -o -name '*remount-fs*' \
+           -o -name 'systemd-logind*' -o -name 'systemd-tmpfiles*' \) -delete
+
+# Enable CRB for el9 dependencies (jemalloc, babeltrace family can need it).
+RUN dnf -y install dnf-plugins-core && \
+    dnf config-manager --set-enabled crb || true
+
+# Payload: pd-di + runtime-dep RPMs + add_node.py, staged by the role.
+COPY payload/ /opt/payload/
+
+RUN dnf -y install /opt/payload/*.rpm && dnf clean all
+
+# add_node.py may or may not be in the tarball; role ensures it ends up in payload.
+RUN if [ -f /opt/payload/add_node.py ]; then \
+        install -m 0755 /opt/payload/add_node.py /usr/local/bin/add_node.py ; \
+    fi
+
+# Enable the DI services so `systemctl start pd-di` inside the container succeeds.
+RUN systemctl enable lttng-sessiond pd-di-lttng-recorder pd-di || true
+
+STOPSIGNAL SIGRTMIN+3
+EXPOSE 9095/tcp 9096/tcp
+
+WORKDIR /root
+CMD ["/usr/sbin/init"]

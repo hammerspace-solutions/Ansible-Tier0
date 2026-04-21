@@ -225,3 +225,199 @@
         - hammerspace_api_host is defined
         - (hammerspace_serial | default(0) | int) > 0
       tags: [hammerspace, integration]
+
+# =============================================================================
+# Auto-wire DI node IPs into Tier 0 NFS exports
+# =============================================================================
+# When deploy_di is true and di_auto_export is true (default), this play
+# collects DI node IPs from the di_nodes inventory group and ensures they
+# have no_root_squash NFS access on all storage_servers. This eliminates
+# the manual step of adding DI IPs to mover_nodes in vars/main.yml.
+#
+# Runs BEFORE the DI play so exports are ready when DI registers.
+
+- name: Auto-configure NFS exports for DI nodes
+  hosts: storage_servers
+  become: true
+  gather_facts: true
+
+  vars_files:
+    - vars/main.yml
+    - vars/vault.yml
+
+  tasks:
+    - name: Skip if DI is not enabled or auto-export is disabled
+      ansible.builtin.meta: end_play
+      when: not (deploy_di | default(false) | bool) or not (di_auto_export | default(true) | bool)
+
+    - name: Collect DI node IPs from inventory
+      ansible.builtin.set_fact:
+        _di_node_ips: >-
+          {{ groups['di_nodes'] | default([])
+             | map('extract', hostvars, 'di_node_ip')
+             | select('defined')
+             | list }}
+        _di_node_ips_fallback: >-
+          {{ groups['di_nodes'] | default([])
+             | map('extract', hostvars, 'ansible_host')
+             | select('defined')
+             | list }}
+      run_once: true
+
+    - name: Merge DI IPs (prefer di_node_ip, fall back to ansible_host)
+      ansible.builtin.set_fact:
+        _di_ips_resolved: >-
+          {{ _di_node_ips if (_di_node_ips | length > 0)
+             else _di_node_ips_fallback }}
+      run_once: true
+
+    - name: Identify DI IPs not already in mover_nodes
+      ansible.builtin.set_fact:
+        _di_ips_new: "{{ _di_ips_resolved | difference(mover_nodes | default([])) }}"
+      run_once: true
+
+    - name: Skip if all DI IPs are already in mover_nodes
+      ansible.builtin.debug:
+        msg: "All DI node IPs are already in mover_nodes — no export changes needed."
+      when: _di_ips_new | length == 0
+      run_once: true
+
+    - name: Add DI node IPs to NFS exports
+      when: _di_ips_new | length > 0
+      block:
+        - name: Display new DI IPs being added to exports
+          ansible.builtin.debug:
+            msg: "Adding DI node IPs to NFS exports (no_root_squash): {{ _di_ips_new | join(', ') }}"
+          run_once: true
+
+        - name: Add DI IPs to /etc/exports
+          ansible.builtin.lineinfile:
+            path: /etc/exports
+            regexp: "^{{ item.0 }}\\s.*{{ item.1 | regex_escape }}"
+            line: "{{ item.0 }} {{ item.1 }}({{ hammerspace_export_opts | default('rw,no_root_squash,sync,secure,mp,no_subtree_check') }})"
+            insertafter: "^{{ item.0 | regex_escape }}\\s"
+            state: present
+          loop: "{{ mount_points | default([]) | map(attribute='path') | product(_di_ips_new) | list }}"
+          loop_control:
+            label: "{{ item.0 }} -> {{ item.1 }}"
+          notify: reload nfs exports
+          when: mount_points is defined
+
+  handlers:
+    - name: reload nfs exports
+      ansible.builtin.command:
+        cmd: exportfs -ra
+      changed_when: true
+
+  tags: [di, di-exports]
+
+# =============================================================================
+# Data Instantiator (DI / NFS Mover) Deployment
+# =============================================================================
+# Optional: Deploy Hammerspace DI on dedicated mover nodes.
+# Enable with deploy_di: true in vars/main.yml or -e deploy_di=true
+#
+# DI nodes are separate from storage_servers — define them in the di_nodes
+# inventory group. They can overlap with storage_servers if DI runs on the
+# same hosts.
+#
+# Two deployment modes:
+#   di_deployment_type: "host"      - Install pd-di RPM directly on the OS
+#   di_deployment_type: "container" - Build & run pd-di in a container (podman/docker)
+#
+# Usage:
+#   ansible-playbook site.yml -i inventory.yml -e deploy_di=true
+#   ansible-playbook site.yml -i inventory.yml --tags di
+#   ansible-playbook site.yml -i inventory.yml --tags di --limit "mover101"
+
+- name: Deploy Hammerspace Data Instantiator (DI)
+  hosts: di_nodes
+  become: true
+  gather_facts: true
+
+  vars_files:
+    - vars/main.yml
+    - vars/vault.yml
+
+  pre_tasks:
+    - name: Skip DI deployment if not enabled
+      ansible.builtin.meta: end_play
+      when: not (deploy_di | default(false) | bool)
+
+    - name: Verify required DI variables are defined
+      ansible.builtin.assert:
+        that:
+          - hammerspace_cluster_mgmt_ip is defined
+          - hammerspace_api_user is defined
+          - hammerspace_api_password is defined
+        fail_msg: "Required Hammerspace cluster variables are not defined. Check vars/main.yml"
+
+    - name: Validate di_deployment_type
+      ansible.builtin.assert:
+        that:
+          - di_deployment_type in ['host', 'container']
+        fail_msg: "di_deployment_type must be 'host' or 'container' (got: '{{ di_deployment_type }}')"
+
+    - name: Display selected DI deployment mode
+      ansible.builtin.debug:
+        msg: >-
+          DI deployment mode: {{ di_deployment_type }}{% if di_deployment_type == 'container' %}
+          ({{ di_container_runtime }}, image={{ di_container_image }},
+          base={{ di_container_base_image }}){% endif %}
+
+    - name: Check if DI node already exists in Hammerspace
+      ansible.builtin.shell:
+        cmd: >-
+          curl -s -o /dev/stdout -w "\n%{http_code}" --max-time 30
+          {{ '' if (hammerspace_api_validate_certs | default(false)) else '-k' }}
+          -u "{{ hammerspace_api_user }}:{{ hammerspace_api_password }}"
+          "https://{{ hammerspace_api_host }}:{{ hammerspace_api_port | default(8443) }}/mgmt/v1.2/rest/nodes/{{ di_node_name | default(inventory_hostname) | urlencode }}"
+      register: hs_di_precheck_raw
+      changed_when: false
+      failed_when: false
+      check_mode: false
+
+    - name: Set DI node_already_registered fact
+      ansible.builtin.set_fact:
+        node_already_registered: "{{ ((hs_di_precheck_raw.stdout_lines | default(['404']))[-1] | int) == 200 }}"
+
+    - name: Display DI node registration status
+      ansible.builtin.debug:
+        msg: >-
+          DI node '{{ di_node_name | default(inventory_hostname) }}'
+          {{ 'is already registered in Hammerspace' if node_already_registered | bool
+          else 'is not yet registered in Hammerspace' }}
+
+  roles:
+    - role: di
+      tags: [di]
+
+  post_tasks:
+    - name: DI deployment complete (host mode)
+      ansible.builtin.debug:
+        msg: |
+          ============================================
+          DI DEPLOYMENT COMPLETE
+          ============================================
+          Node: {{ di_node_name | default(inventory_hostname) }}
+          Mode: host (native RPM)
+          Verify: ssh {{ inventory_hostname }} "systemctl status pd-di"
+          Cluster: anvil> node-list --name {{ di_node_name | default(inventory_hostname) }}
+          ============================================
+      when: di_deployment_type == 'host'
+
+    - name: DI deployment complete (container mode)
+      ansible.builtin.debug:
+        msg: |
+          ============================================
+          DI DEPLOYMENT COMPLETE
+          ============================================
+          Node: {{ di_node_name | default(inventory_hostname) }}
+          Mode: container ({{ di_container_runtime }})
+          Container: {{ di_container_name }}
+          Image: {{ di_container_image }}
+          Verify: ssh {{ inventory_hostname }} "{{ di_container_runtime }} exec {{ di_container_name }} systemctl status pd-di"
+          Logs:   ssh {{ inventory_hostname }} "{{ di_container_runtime }} logs {{ di_container_name }}"
+          Cluster: anvil> node-list --name {{ di_node_name | default(inventory_hostname) }}
+          ============================================
+      when: di_deployment_type == 'container'

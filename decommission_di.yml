@@ -1,0 +1,52 @@
+---
+# Decommission Data Instantiator (DI) nodes from Hammerspace
+# Removes volumes, unregisters node from cluster, stops services
+#
+# CAUTION: This is a destructive operation. Use --check first.
+#
+# Usage:
+#   ansible-playbook decommission_di.yml -i inventory.yml --check
+#   ansible-playbook decommission_di.yml -i inventory.yml --limit "mover101"
+#   ansible-playbook decommission_di.yml -i inventory.yml
+
+- name: Decommission Hammerspace Data Instantiator (DI)
+  hosts: di_nodes
+  become: true
+  gather_facts: true
+  serial: 1
+
+  vars_files:
+    - vars/main.yml
+    - vars/vault.yml
+
+  pre_tasks:
+    - name: Verify required variables are defined
+      ansible.builtin.assert:
+        that:
+          - hammerspace_cluster_mgmt_ip is defined
+          - hammerspace_api_user is defined
+          - hammerspace_api_password is defined
+        fail_msg: "Required Hammerspace cluster variables are not defined. Check vars/main.yml"
+
+    - name: Display decommission warning
+      ansible.builtin.debug:
+        msg: |
+          === DECOMMISSION WARNING ===
+          About to decommission DI node: {{ di_node_name | default(inventory_hostname) }}
+          Evacuate data: {{ di_decommission_evacuate_data | default(true) }}
+          Stop services: {{ di_decommission_stop_services | default(true) }}
+          ============================
+
+  tasks:
+    - name: Run DI decommission
+      ansible.builtin.include_role:
+        name: di
+        tasks_from: decommission.yml
+      tags: [decommission]
+
+  post_tasks:
+    - name: Decommission complete
+      ansible.builtin.debug:
+        msg: |
+          DI decommission complete for {{ di_node_name | default(inventory_hostname) }}
+          Node has been removed from Hammerspace and services stopped.

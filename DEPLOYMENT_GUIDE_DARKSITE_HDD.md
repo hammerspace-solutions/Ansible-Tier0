@@ -18,7 +18,8 @@ Step-by-step guide for deploying Hammerspace Tier 0 storage on air-gapped (darks
 10. [Deploy](#10-deploy)
 11. [Verify Deployment](#11-verify-deployment)
 12. [Adding New Nodes](#12-adding-new-nodes)
-13. [Troubleshooting](#13-troubleshooting)
+13. [Data Instantiator (DI) Deployment](#13-data-instantiator-di-deployment)
+14. [Troubleshooting](#14-troubleshooting)
 
 ---
 
@@ -234,6 +235,45 @@ all:
 ```
 
 ### 5.2 Inventory with AZ Groups (Multi-Rack)
+
+**Automatic AZ detection from group names (recommended):**
+
+Name your groups `AZ1`, `AZ2`, etc. and the playbook detects the AZ prefix automatically.
+Set `hammerspace_volume_az_prefix_enabled: true` in `vars/main.yml` — no per-host variables needed.
+
+```yaml
+---
+all:
+  children:
+    storage_servers:
+      children:
+        AZ1:
+          hosts:
+            tier0-rack-a-01:
+              ansible_host: 192.168.1.101
+            tier0-rack-a-02:
+              ansible_host: 192.168.1.102
+        AZ2:
+          hosts:
+            tier0-rack-b-01:
+              ansible_host: 192.168.2.101
+            tier0-rack-b-02:
+              ansible_host: 192.168.2.102
+        AZ3:
+          hosts:
+            tier0-rack-c-01:
+              ansible_host: 192.168.3.101
+
+      vars:
+        ansible_user: root
+        ansible_ssh_private_key_file: /home/admin/.ssh/id_rsa
+        ansible_python_interpreter: /usr/bin/python3
+        ansible_become: true
+```
+
+**Alternative: Per-host explicit prefix (custom group names):**
+
+If your group names don't follow the `AZ<N>` pattern, set `hammerspace_volume_az_prefix` on each host:
 
 ```yaml
 ---
@@ -647,7 +687,22 @@ ansible-playbook site.yml --limit "tier0-node-01,tier0-node-02"
 ansible-playbook site.yml --limit "tier0-rack-a-*"
 ```
 
-### 10.4 Deploy by Role (Step-by-Step)
+### 10.4 Throttled Deployment (Large Clusters)
+
+For deployments with many nodes (10+), throttle API calls to avoid overwhelming Anvil:
+
+```bash
+# Process 2 nodes at a time (serial play)
+ansible-playbook site.yml -e hammerspace_serial=2
+
+# Or limit concurrent volume adds to 3
+ansible-playbook site.yml -e hammerspace_volume_add_throttle=3
+
+# Both: 5 nodes per batch, max 2 concurrent volume adds
+ansible-playbook site.yml -e hammerspace_serial=5 -e hammerspace_volume_add_throttle=2
+```
+
+### 10.5 Deploy by Role (Step-by-Step)
 
 ```bash
 # Step 1: Discovery and precheck
@@ -666,7 +721,7 @@ ansible-playbook site.yml --tags "firewall"
 ansible-playbook site.yml --tags "hammerspace"
 ```
 
-### 10.5 Deployment Flow
+### 10.6 Deployment Flow
 
 **HDD + Software RAID:**
 ```
@@ -810,7 +865,119 @@ ansible-playbook site.yml --limit "tier0-node-05,tier0-node-06"
 
 ---
 
-## 13. Troubleshooting
+## 13. Data Instantiator (DI) Deployment
+
+The Data Instantiator (DI / NFS Mover) moves file instances between storage volumes. In darksite/on-prem environments, DI nodes are typically separate servers from Tier 0 storage nodes, but can also be co-located on the same hosts (add the host to both `storage_servers` and `di_nodes` groups).
+
+### 13.1 Add DI Nodes to Inventory
+
+Add a `di_nodes` group to your static inventory. For AZ distribution, nest DI nodes under AZ groups:
+
+```yaml
+# inventory.yml (add alongside storage_servers)
+all:
+  children:
+    storage_servers:
+      # ... your Tier 0 nodes ...
+
+    di_nodes:
+      children:
+        AZ1:
+          hosts:
+            mover101:
+              ansible_host: 192.168.1.50
+              di_node_ip: 192.168.1.50
+              di_node_name: mover101
+        AZ2:
+          hosts:
+            mover201:
+              ansible_host: 192.168.2.50
+              di_node_ip: 192.168.2.50
+              di_node_name: mover201
+      vars:
+        ansible_user: root
+        ansible_ssh_private_key_file: /home/admin/.ssh/id_rsa
+```
+
+The precheck validates DI nodes span at least `di_min_az_count` AZs (default: 2). Set `di_enforce_az_distribution: true` to make this a hard failure.
+
+### 13.2 Prepare DI Packages (Offline)
+
+For air-gapped environments, place all DI RPMs in the `payload/` directory:
+
+```bash
+# Both x86_64 and aarch64 RPMs can coexist — the playbook auto-selects by architecture:
+payload/
+  pd-di-5.3.0-4321.el9.x86_64.rpm       # x86_64
+  pd-di-5.3.0-4321.el9.aarch64.rpm      # ARM (optional)
+  jemalloc-5.3.0-6.el9.x86_64.rpm
+  lttng-tools-2.12.11-1.el9.x86_64.rpm
+  lttng-ust-2.12.0-6.el9.x86_64.rpm
+  libtirpc-1.3.3-10.hs.el9.x86_64.rpm
+  babeltrace-1.5.8-10.el9.x86_64.rpm
+  add_node.py                            # Registration script
+```
+
+Ensure `di_rpm_source: "directory"` is set in `vars/main.yml` (this is the default).
+
+### 13.3 Configure and Deploy
+
+```yaml
+# vars/main.yml — enable DI
+deploy_di: true
+di_activate: true                  # false = pre-deploy only, activate later
+di_auto_export: true               # auto-add DI IPs to Tier 0 NFS exports
+di_deployment_type: "host"         # or "container"
+di_rpm_source: "directory"         # use payload/ directory
+hammerspace_cluster_hostname: "data-cluster"
+```
+
+```bash
+# Deploy Tier 0 storage + DI together
+ansible-playbook site.yml -e deploy_di=true
+
+# Deploy only DI (skip Tier 0 roles)
+ansible-playbook site.yml --tags di -e deploy_di=true
+
+# Target a specific DI node
+ansible-playbook site.yml --tags di --limit "mover101" -e deploy_di=true
+```
+
+### 13.4 Pre-deploy / Activate Later
+
+Pre-stage DI on nodes without starting services. Activate when needed (e.g., during decommission events):
+
+```bash
+# 1. Pre-deploy: install but don't start pd-di or register
+ansible-playbook site.yml --tags di -e deploy_di=true -e di_activate=false
+
+# 2. Activate later:
+ansible-playbook site.yml --tags di-activate -e deploy_di=true -e di_activate=true --limit "mover101"
+```
+
+### 13.5 Verify DI Deployment
+
+```bash
+# On the DI node
+ssh mover101 "systemctl status pd-di"
+
+# In Hammerspace CLI
+anvil> node-list --name mover101
+```
+
+### 13.6 Decommission DI Nodes
+
+```bash
+# Dry run
+ansible-playbook decommission_di.yml --limit "mover101" --check
+
+# Execute (serial: 1 — one node at a time)
+ansible-playbook decommission_di.yml --limit "mover101"
+```
+
+---
+
+## 14. Troubleshooting
 
 ### Package Installation Issues (Offline)
 
@@ -946,6 +1113,9 @@ ss -tlnp | grep -E '2049|111|20048'
 | NFS only | `ansible-playbook site.yml --tags "nfs"` |
 | Hammerspace only | `ansible-playbook site.yml --tags "hammerspace"` |
 | Skip Hammerspace | `ansible-playbook site.yml --skip-tags hammerspace` |
+| Deploy DI nodes | `ansible-playbook site.yml --tags di -e deploy_di=true` |
+| Deploy DI (container) | `ansible-playbook site.yml --tags di -e deploy_di=true -e di_deployment_type=container` |
+| Decommission DI node | `ansible-playbook decommission_di.yml --limit "mover101"` |
 | Verbose output | `ansible-playbook site.yml -vvv` |
 | Install offline pkgs | `ansible-playbook install_offline_packages.yml` |
 

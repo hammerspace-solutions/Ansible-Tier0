@@ -27,6 +27,7 @@ Tier 0 transforms existing local NVMe storage on GPU servers into ultra-fast, pe
 - **Node Registration**: Automatically registers storage servers via Anvil REST API
 - **Volume Management**: Adds storage volumes with configurable thresholds and protection settings
 - **Task Queue Throttling**: Prevents API overload by monitoring queued tasks (configurable min/max thresholds)
+- **Anvil Overload Protection**: Two options for large deployments — serialized play (`hammerspace_serial`) and volume add throttle (`hammerspace_volume_add_throttle`)
 - **Volume Groups**: Creates volume groups and adds volumes to existing groups
 - **Share Management**: Creates shares with configurable export options
 - **Share Objectives**: Applies availability/durability objectives to shares
@@ -46,6 +47,13 @@ Tier 0 transforms existing local NVMe storage on GPU servers into ultra-fast, pe
 - **Site Name**: Configure cluster site name
 - **Physical Location**: Set datacenter, room, rack, and position metadata
 - **Prometheus Monitoring**: Enable Prometheus exporters for metrics collection
+
+### Data Instantiator (DI / NFS Mover)
+- **DI Deployment**: Install pd-di on dedicated mover nodes via RPM (host mode) or container (podman/docker)
+- **Two Deployment Modes**: Host-native RPM install or containerized deployment for heterogeneous OS environments
+- **Package Source Flexibility**: Download from URL, copy from local tarball, or use loose RPMs in `payload/` directory
+- **Automatic Registration**: Registers DI nodes with Hammerspace cluster via `add_node.py`
+- **DI Decommission**: Graceful node removal with volume evacuation, API deregistration, and service teardown
 
 ### Platform Support
 - **Multi-Distribution Support**: Works on Debian, Ubuntu, RHEL, Rocky Linux, CentOS
@@ -67,7 +75,8 @@ ansible-storage-setup/
 ├── inventory.oci.yml        # OCI dynamic inventory (auto-discovery)
 ├── inventory.aws.yml        # AWS EC2 dynamic inventory (auto-discovery)
 ├── inventory.gcp.yml        # GCP Compute Engine dynamic inventory (auto-discovery)
-├── site.yml                 # Main playbook
+├── site.yml                 # Main playbook (Tier0 + optional DI)
+├── decommission_di.yml      # DI node decommission playbook
 ├── preflight_check.yml      # Compare inventory with Hammerspace (find new instances)
 ├── deploy_new_instances.sh  # Automated deployment script
 ├── verify_nfs.yml           # NFS verification playbook
@@ -79,6 +88,9 @@ ansible-storage-setup/
 ├── rename_oci_instances_az.py # Rename OCI instances with AZ prefix
 ├── tier0_instances_limit     # Instance name list for targeted operations
 ├── DEPLOYMENT_GUIDE.md       # Step-by-step deployment guide for OCI
+├── container/
+│   └── Containerfile         # DI container image definition (Rocky 9)
+├── payload/                  # DI RPMs + add_node.py (gitignored, populate for di_rpm_source=directory)
 ├── vars/
 │   └── main.yml             # Main variables (customize this!)
 └── roles/
@@ -88,6 +100,21 @@ ansible-storage-setup/
     ├── filesystem_setup/        # Filesystem creation with UUID-based fstab
     ├── nfs_setup/               # NFS server configuration
     ├── firewall_setup/          # Firewall configuration (firewalld/ufw/iptables)
+    ├── di/                      # Data Instantiator (DI / NFS Mover) - consolidated role
+    │   ├── tasks/
+    │   │   ├── main.yml             # Orchestrator (dispatches to sub-tasks)
+    │   │   ├── precheck.yml         # OS/network validation
+    │   │   ├── dependencies.yml     # EPEL, lttng, jemalloc, babeltrace
+    │   │   ├── install.yml          # Stage & install pd-di RPM
+    │   │   ├── selinux.yml          # Disable SELinux (RedHat)
+    │   │   ├── firewall.yml         # Open ports 9095/9096
+    │   │   ├── services.yml         # Enable lttng + pd-di services
+    │   │   ├── register.yml         # Register via add_node.py
+    │   │   ├── container_runtime.yml    # Install podman/docker
+    │   │   ├── container_deploy.yml     # Build & run DI container
+    │   │   └── decommission.yml     # Evacuate volumes & remove node
+    │   ├── vars/                    # OS-specific packages (redhat.yml, debian.yml)
+    │   └── defaults/main.yml       # Default ports, container flags
     └── hammerspace_integration/ # Anvil API integration
         ├── tasks/
         │   ├── main.yml             # Main integration orchestration
@@ -155,6 +182,40 @@ all:
         tier0-node-02:
           ansible_host: 10.200.100.102
 ```
+
+**With Availability Zones (on-prem multi-AZ):**
+
+For on-premises deployments with multiple availability zones, nest hosts under AZ groups.
+The playbook automatically detects `AZ<N>` group names and uses them as volume name prefixes
+(requires `hammerspace_volume_az_prefix_enabled: true` in `vars/main.yml`).
+
+```yaml
+all:
+  children:
+    storage_servers:
+      children:
+        AZ1:
+          hosts:
+            node101:
+              ansible_host: 10.200.101.216
+            node102:
+              ansible_host: 10.200.101.182
+        AZ2:
+          hosts:
+            node201:
+              ansible_host: 10.200.103.188
+            node202:
+              ansible_host: 10.200.103.228
+        AZ3:
+          hosts:
+            node301:
+              ansible_host: 10.200.100.135
+            node302:
+              ansible_host: 10.200.103.24
+```
+
+This produces volume names like `AZ1:node101::/hammerspace/hsvol0`. No per-host variables
+needed — the AZ prefix is derived from the inventory group name automatically.
 
 **Running locally on target server** (no SSH needed):
 ```yaml
@@ -525,12 +586,18 @@ hammerspace_volume_az_prefix_enabled: true
 hammerspace_volume_az_prefix_mode: "AZ1:"
 
 # Option 3: Enable with auto-detection from OCI fault domain
-# FAULT-DOMAIN-1 -> FD1:, FAULT-DOMAIN-2 -> FD2:, etc.
+# FAULT-DOMAIN-1 -> AZ1:, FAULT-DOMAIN-2 -> AZ2:, etc.
 hammerspace_volume_az_prefix_enabled: true
 hammerspace_volume_az_prefix_mode: "auto"
 
 # Option 4: Direct override (ignores above settings)
 hammerspace_volume_az_prefix: "WEST:"
+
+# Option 5: Auto-detection from inventory group names (on-prem)
+# When hosts are nested under AZ1/AZ2/AZ3 groups in inventory,
+# the prefix is derived automatically. Just enable:
+hammerspace_volume_az_prefix_enabled: true
+# No mode needed — group_names detection is a built-in fallback
 ```
 
 **OCI Fault Domain Auto-Mapping:**
@@ -563,7 +630,8 @@ AZ detection priority for node labels:
 1. Explicit `hammerspace_node_az` variable
 2. OCI fault domain (auto-detected from dynamic inventory)
 3. AZ prefix in node name (legacy format `AZ1:node-name`)
-4. Default AZ (`hammerspace_default_az`)
+4. Inventory group name matching `AZ<N>` pattern (on-prem inventory groups)
+5. Default AZ (`hammerspace_default_az`)
 
 **Verify fault domain mapping:**
 ```bash
@@ -1389,6 +1457,46 @@ hammerspace_shares:
         rootSquash: false
 ```
 
+### Anvil Overload Protection (Large Deployments)
+
+When deploying many nodes (10+) with multiple volumes each, concurrent API calls can overwhelm Anvil. Two options are available (use one or both):
+
+**Option A: Serialized play (`hammerspace_serial`)** — coarse-grained
+
+Processes N nodes at a time through the entire hammerspace_integration role. All volumes for a batch of nodes complete before the next batch starts.
+
+```yaml
+# vars/main.yml
+hammerspace_serial: 2    # Process 2 nodes at a time (0 = all in parallel, default)
+```
+
+Or via command line:
+```bash
+ansible-playbook site.yml -e hammerspace_serial=2
+```
+
+**Option B: Volume add throttle (`hammerspace_volume_add_throttle`)** — fine-grained
+
+Limits how many hosts can POST a volume add concurrently. Node registration and other tasks still run in parallel.
+
+```yaml
+# vars/main.yml
+hammerspace_volume_add_throttle: 3    # Max 3 concurrent volume adds (0 = no limit, default)
+```
+
+**Combining both options:**
+
+```yaml
+# Process 5 nodes at a time, but only 2 volume POSTs concurrently within each batch
+hammerspace_serial: 5
+hammerspace_volume_add_throttle: 2
+```
+
+| Option | Scope | Best For |
+|--------|-------|----------|
+| `hammerspace_serial: N` | Entire integration role | Small clusters, conservative approach |
+| `hammerspace_volume_add_throttle: N` | Volume adds only | Large clusters, maximize parallelism for non-volume work |
+
 ### Run Integration Only
 
 If storage is already set up and you just need to register with Hammerspace:
@@ -1832,6 +1940,261 @@ Collects GPU memory fabric OCIDs from OCI instances for AZ mapping.
 ```bash
 ansible-playbook collect_gpu_fabric.yml -i inventory.oci.yml
 # Output: gpu_fabric_data.txt
+```
+
+## Data Instantiator (DI / NFS Mover) Deployment
+
+The Data Instantiator (DI) is a Hammerspace component that moves and copies file instances between storage volumes via NFS. DI nodes are typically separate from Tier 0 storage servers but connect to the same Hammerspace cluster.
+
+### Enable DI Deployment
+
+DI deployment is disabled by default. Enable it in `vars/main.yml` or via command line:
+
+```yaml
+# vars/main.yml
+deploy_di: true
+```
+
+```bash
+# Or via command line
+ansible-playbook site.yml -i inventory.yml -e deploy_di=true
+```
+
+DI nodes can be separate servers or co-located on the same Tier 0 storage nodes — just add the host to both inventory groups.
+
+### DI Inventory
+
+Add DI nodes to the `di_nodes` group in your inventory:
+
+**Separate DI nodes:**
+```yaml
+all:
+  children:
+    storage_servers:
+      hosts:
+        node101:
+          ansible_host: 10.200.101.216
+    di_nodes:
+      hosts:
+        mover101:
+          ansible_host: 10.0.12.100
+          di_node_ip: 10.0.12.100
+          di_node_name: mover101
+      vars:
+        ansible_user: root
+```
+
+**Co-located (DI on same Tier 0 node):**
+```yaml
+all:
+  children:
+    storage_servers:
+      hosts:
+        node101:
+          ansible_host: 10.200.101.216
+    di_nodes:
+      hosts:
+        node101:
+          ansible_host: 10.200.101.216
+          di_node_ip: 10.200.101.216
+          di_node_name: node101
+      vars:
+        ansible_user: root
+```
+
+**NFS export auto-wiring:** When `di_auto_export: true` (default), DI node IPs are automatically added to NFS exports on all storage_servers with `no_root_squash` before DI deployment runs. No need to manually edit `mover_nodes` in `vars/main.yml`.
+
+### Deployment Modes
+
+| Mode | Setting | Description |
+|------|---------|-------------|
+| Host (default) | `di_deployment_type: "host"` | Install pd-di RPM directly on the OS |
+| Container | `di_deployment_type: "container"` | Build & run pd-di in a container |
+
+**Host mode** installs pd-di and dependencies (lttng, jemalloc, babeltrace) natively. Best for homogeneous el9 environments.
+
+**Container mode** builds a Rocky 9 container image with pd-di inside and runs it via podman or docker. Useful when the host OS is not el9, or for immutable/consistent deployments.
+
+```yaml
+# Container mode settings
+di_deployment_type: "container"
+di_container_runtime: "podman"       # or "docker"
+di_container_base_image: "rockylinux:9"
+di_container_image: "hammerspace-di:local"
+```
+
+### Package Source
+
+Three options for providing pd-di packages:
+
+| Source | Setting | Description |
+|--------|---------|-------------|
+| Directory (default) | `di_rpm_source: "directory"` | Loose RPMs in `./payload/` directory |
+| URL | `di_rpm_source: "url"` | Download tarball from `di_tarball_url` |
+| Local tarball | `di_rpm_source: "local"` | Copy tarball from `di_tarball_local_path` |
+
+**Using the payload directory (recommended for air-gapped):**
+
+Both x86_64 and aarch64 RPMs can coexist in the same directory — the playbook automatically selects packages matching each target node's architecture.
+
+```bash
+# Drop RPMs into the payload/ directory
+ls payload/
+  # x86_64
+  pd-di-5.3.0-4321.el9.x86_64.rpm
+  jemalloc-5.3.0-6.el9.x86_64.rpm
+  lttng-tools-2.12.11-1.el9.x86_64.rpm
+  lttng-ust-2.12.0-6.el9.x86_64.rpm
+  libtirpc-1.3.3-10.hs.el9.x86_64.rpm
+  babeltrace-1.5.8-10.el9.x86_64.rpm
+  # aarch64 (optional — only needed for ARM targets)
+  pd-di-5.3.0-4321.el9.aarch64.rpm
+  jemalloc-5.3.0-6.el9.aarch64.rpm
+  ...
+  # Architecture-independent
+  add_node.py
+```
+
+### DI Task Execution Order
+
+When DI is enabled, the `di` role runs on `di_nodes` after the Tier 0 storage setup. The role's `main.yml` orchestrator dispatches to these sub-tasks:
+
+| Step | Task | Mode | Description |
+|------|------|------|-------------|
+| 1 | `precheck.yml` | Both | Validate OS, architecture, network connectivity |
+| 2 | `dependencies.yml` | Host | Install EPEL, lttng, jemalloc, babeltrace, pip packages |
+| 3 | `install.yml` | Host | Stage and install pd-di RPM |
+| 4 | `selinux.yml` | Both | Disable SELinux (RedHat only) |
+| 5 | `firewall.yml` | Both | Open ports 9095/9096 |
+| 6 | `services.yml` | Host | Enable lttng-sessiond, pd-di-lttng-recorder, pd-di |
+| 7 | `register.yml` | Host | Register with Hammerspace via add_node.py |
+| 5b | `container_runtime.yml` | Container | Install podman or docker |
+| 6b | `container_deploy.yml` | Container | Build image, run container, register |
+
+### Running DI Deployment
+
+```bash
+# Deploy Tier 0 storage + DI together
+ansible-playbook site.yml -i inventory.yml -e deploy_di=true
+
+# Deploy only DI nodes (skip Tier 0 roles)
+ansible-playbook site.yml -i inventory.yml --tags di -e deploy_di=true
+
+# DI in container mode
+ansible-playbook site.yml -i inventory.yml -e deploy_di=true -e di_deployment_type=container
+
+# Target specific DI nodes
+ansible-playbook site.yml -i inventory.yml --tags di --limit "mover101" -e deploy_di=true
+
+# Dry run
+ansible-playbook site.yml -i inventory.yml --tags di -e deploy_di=true --check
+```
+
+### Pre-deploy / Activate Later
+
+Pre-stage DI on nodes without starting services or registering. Useful for pre-deploying DI across nodes and activating only during decommission events.
+
+```bash
+# 1. Pre-deploy: install everything but don't start pd-di or register
+ansible-playbook site.yml --tags di -e deploy_di=true -e di_activate=false
+
+# 2. Later, activate specific nodes when needed:
+ansible-playbook site.yml --tags di-activate -e deploy_di=true -e di_activate=true --limit "mover101"
+```
+
+| Variable | Default | Effect |
+|----------|---------|--------|
+| `di_activate: true` | Default | Full deploy — install, start services, register |
+| `di_activate: false` | Pre-deploy | Install and configure only, skip services and registration |
+
+The `di-activate` tag targets only the activation steps (services + registration), skipping the already-completed install.
+
+### DI AZ Distribution
+
+Ensure DI nodes are spread across availability zones for redundancy. Nest DI nodes under AZ groups in inventory:
+
+```yaml
+all:
+  children:
+    di_nodes:
+      children:
+        AZ1:
+          hosts:
+            mover101:
+              ansible_host: 10.0.12.100
+              di_node_ip: 10.0.12.100
+        AZ2:
+          hosts:
+            mover201:
+              ansible_host: 10.0.12.200
+              di_node_ip: 10.0.12.200
+        AZ3:
+          hosts:
+            mover301:
+              ansible_host: 10.0.12.300
+              di_node_ip: 10.0.12.300
+```
+
+The precheck validates AZ spread before deploying:
+
+```yaml
+# vars/main.yml
+di_min_az_count: 2                    # Minimum AZs DI nodes should span
+di_enforce_az_distribution: false     # true = fail, false = warn only
+```
+
+AZ is auto-detected from inventory group names (`AZ1`, `AZ2`, ...) — the same mechanism used by Tier 0 storage nodes. You can also set `di_node_az` per host to override.
+
+### DI Decommission
+
+To gracefully remove a DI node from the Hammerspace cluster:
+
+```bash
+# Dry run first
+ansible-playbook decommission_di.yml -i inventory.yml --limit "mover101" --check
+
+# Execute decommission (one node at a time, serial: 1)
+ansible-playbook decommission_di.yml -i inventory.yml --limit "mover101"
+```
+
+The decommission workflow:
+1. Identifies all volumes owned by the DI node
+2. Evacuates data from each volume (if `di_decommission_evacuate_data: true`)
+3. Deletes volumes from Hammerspace
+4. Removes the node from the cluster
+5. Stops pd-di services (if `di_decommission_stop_services: true`)
+
+### DI Configuration Variables
+
+Key variables in `vars/main.yml` (see [VARIABLE_REFERENCE.md](VARIABLE_REFERENCE.md) for the full list):
+
+```yaml
+# Master switch
+deploy_di: false
+
+# Activation control (false = pre-deploy only, activate later with --tags di-activate)
+di_activate: true
+
+# Auto-wire DI IPs into Tier 0 NFS exports (no need to edit mover_nodes manually)
+di_auto_export: true
+
+# Deployment mode
+di_deployment_type: "host"             # host | container
+
+# Package source (both x86_64 and aarch64 RPMs can coexist in payload/)
+di_rpm_source: "directory"             # directory | url | local
+di_payload_local_dir: "{{ playbook_dir }}/payload"
+
+# Cluster connection (reuses hammerspace_api_* from Tier 0 settings)
+hammerspace_cluster_mgmt_ip: "{{ hammerspace_api_host }}"
+hammerspace_cluster_hostname: "data-cluster"
+
+# Node config (override per host in inventory)
+di_node_netmask_prefix: 24
+
+# Decommission
+di_decommission_evacuate_data: true
+di_decommission_stop_services: true
 ```
 
 ## Customer Deployment Guide

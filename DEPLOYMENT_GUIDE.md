@@ -14,10 +14,11 @@ Step-by-step guide for deploying Hammerspace Tier 0 storage on Oracle Cloud Infr
 6. [Run Preflight Check](#6-run-preflight-check)
 7. [Deploy to New Instances](#7-deploy-to-new-instances)
 8. [Verify Deployment](#8-verify-deployment)
-9. [Availability Zone (AZ) Configuration with GPU Fabric](#9-availability-zone-az-configuration-with-gpu-fabric)
+9. [Availability Zone (AZ) Configuration](#9-availability-zone-az-configuration-with-gpu-fabric)
 10. [Adding New Instances (Future Deployments)](#10-adding-new-instances-future-deployments)
-11. [Troubleshooting](#11-troubleshooting)
-12. [Decommissioning Instances](#12-decommissioning-instances)
+11. [Data Instantiator (DI) Deployment](#11-data-instantiator-di-deployment)
+12. [Troubleshooting](#12-troubleshooting)
+13. [Decommissioning Instances](#13-decommissioning-instances)
 
 ---
 
@@ -366,6 +367,27 @@ ansible-playbook site.yml -i inventory.oci.yml --limit "instance20260201011850,i
 ansible-playbook site.yml -i inventory.oci.yml --limit "instance202602*"
 ```
 
+### Option D: Throttled Deployment (Large Clusters)
+
+For deployments with many nodes (10+), throttle API calls to avoid overwhelming Anvil:
+
+```bash
+# Process 2 nodes at a time (serial play)
+ansible-playbook site.yml -i inventory.oci.yml -e hammerspace_serial=2
+
+# Or limit concurrent volume adds to 3 (finer-grained)
+ansible-playbook site.yml -i inventory.oci.yml -e hammerspace_volume_add_throttle=3
+
+# Both together: 5 nodes per batch, max 2 concurrent volume adds
+ansible-playbook site.yml -i inventory.oci.yml -e hammerspace_serial=5 -e hammerspace_volume_add_throttle=2
+```
+
+Or set persistently in `vars/main.yml`:
+```yaml
+hammerspace_serial: 2                  # Process 2 nodes at a time (0 = all parallel)
+hammerspace_volume_add_throttle: 3     # Max 3 concurrent volume adds (0 = no limit)
+```
+
 ### Deployment Progress
 
 The playbook will execute these roles in order:
@@ -597,7 +619,46 @@ python3 assign_az_to_volumes.py \
   --dry-run
 ```
 
-### 9.6 Alternative: Fault Domain-Based AZ
+### 9.6 On-Premises AZ via Inventory Groups
+
+For on-premises deployments without cloud metadata, define AZ groups directly in your static inventory:
+
+```yaml
+# inventory.yml
+all:
+  children:
+    storage_servers:
+      children:
+        AZ1:
+          hosts:
+            node101:
+              ansible_host: 10.200.101.216
+            node102:
+              ansible_host: 10.200.101.182
+        AZ2:
+          hosts:
+            node201:
+              ansible_host: 10.200.103.188
+            node202:
+              ansible_host: 10.200.103.228
+        AZ3:
+          hosts:
+            node301:
+              ansible_host: 10.200.100.135
+            node302:
+              ansible_host: 10.200.103.24
+```
+
+Enable AZ prefix in `vars/main.yml`:
+```yaml
+hammerspace_volume_az_prefix_enabled: true
+```
+
+The playbook automatically detects `AZ<N>` group names from `group_names` and uses them as volume prefixes. No per-host variables or prefix mode needed — this is a built-in fallback in the AZ detection chain.
+
+**Result:** Volume names like `AZ1:node101::/hammerspace/hsvol0`, `AZ2:node201::/hammerspace/hsvol0`, etc.
+
+### 9.7 Alternative: Fault Domain-Based AZ
 
 For non-GPU instances or simpler deployments, use OCI Fault Domains instead:
 
@@ -615,7 +676,7 @@ compose:
   hammerspace_volume_az_prefix: fault_domain | regex_replace('FAULT-DOMAIN-', 'AZ') ~ ":"
 ```
 
-### 9.7 Verify AZ Assignment
+### 9.8 Verify AZ Assignment
 
 **Check volume names in Hammerspace:**
 ```bash
@@ -635,7 +696,7 @@ AZ2:instance20260127011852::/hammerspace/hsvol0
 AZ3:instance20260127011853::/hammerspace/hsvol0
 ```
 
-### 9.8 AZ Best Practices
+### 9.9 AZ Best Practices
 
 | Recommendation | Description |
 |----------------|-------------|
@@ -714,7 +775,160 @@ python3 assign_az_to_volumes.py --host <ANVIL_IP> --user admin --password-file ~
 
 ---
 
-## 11. Troubleshooting
+## 11. Data Instantiator (DI) Deployment
+
+The Data Instantiator (DI / NFS Mover) moves file instances between storage volumes. DI nodes are typically separate from Tier 0 storage servers but connect to the same Hammerspace cluster.
+
+### 11.1 Prerequisites
+
+| Requirement | Description |
+|-------------|-------------|
+| DI Nodes | Linux servers (RHEL/Rocky 9, Ubuntu) with network access to Anvil |
+| Packages | pd-di RPMs (from Hammerspace) — via URL, tarball, or `payload/` directory |
+| Network | DI nodes must reach Anvil on port 8443 and expose ports 9095/9096 |
+| Credentials | Same Hammerspace API credentials as Tier 0 |
+
+### 11.2 Add DI Nodes to Inventory
+
+Add a `di_nodes` group to your inventory file. For AZ distribution, nest DI nodes under AZ groups:
+
+```yaml
+# inventory.yml (add alongside storage_servers)
+all:
+  children:
+    storage_servers:
+      hosts:
+        # ... your Tier 0 storage nodes ...
+
+    di_nodes:
+      children:
+        AZ1:
+          hosts:
+            mover101:
+              ansible_host: 10.0.12.100
+              di_node_ip: 10.0.12.100
+              di_node_name: mover101
+        AZ2:
+          hosts:
+            mover201:
+              ansible_host: 10.0.12.200
+              di_node_ip: 10.0.12.200
+              di_node_name: mover201
+      vars:
+        ansible_user: root
+```
+
+The precheck validates that DI nodes span at least `di_min_az_count` AZs (default: 2). Set `di_enforce_az_distribution: true` to make this a hard failure instead of a warning.
+
+### 11.3 Configure DI Variables
+
+Enable DI in `vars/main.yml`:
+
+```yaml
+# Master switch
+deploy_di: true
+
+# Activation control (false = install only, activate later)
+di_activate: true
+
+# Auto-wire DI IPs into Tier 0 NFS exports (eliminates manual mover_nodes editing)
+di_auto_export: true
+
+# Deployment mode: "host" (default) or "container"
+di_deployment_type: "host"
+
+# Package source: "directory" (default), "url", or "local"
+di_rpm_source: "directory"
+
+# Cluster connection (defaults to same as Tier 0 hammerspace_api_host)
+hammerspace_cluster_mgmt_ip: "{{ hammerspace_api_host }}"
+hammerspace_cluster_hostname: "data-cluster"
+```
+
+### 11.4 Prepare DI Packages
+
+**Option A: Payload directory (recommended for air-gapped)**
+
+Drop the RPMs and `add_node.py` into the `payload/` directory. Both x86_64 and aarch64 RPMs can coexist — the playbook selects the correct architecture automatically:
+
+```bash
+ls payload/
+  pd-di-5.3.0-4321.el9.x86_64.rpm     # x86_64
+  pd-di-5.3.0-4321.el9.aarch64.rpm    # ARM (optional)
+  jemalloc-5.3.0-6.el9.x86_64.rpm
+  lttng-tools-2.12.11-1.el9.x86_64.rpm
+  lttng-ust-2.12.0-6.el9.x86_64.rpm
+  libtirpc-1.3.3-10.hs.el9.x86_64.rpm
+  babeltrace-1.5.8-10.el9.x86_64.rpm
+  add_node.py
+```
+
+**Option B: URL download**
+
+```yaml
+di_rpm_source: "url"
+di_tarball_url: "https://trans.doit.hammerspace.com/download/tier0/components/el9-components-5.1.41-452.tar.gz"
+```
+
+### 11.5 Deploy DI
+
+```bash
+# Deploy Tier 0 + DI together
+ansible-playbook site.yml -i inventory.yml -e deploy_di=true
+
+# Deploy only DI (skip Tier 0 roles)
+ansible-playbook site.yml -i inventory.yml --tags di -e deploy_di=true
+
+# Target specific DI node
+ansible-playbook site.yml -i inventory.yml --tags di --limit "mover101" -e deploy_di=true
+
+# Container mode
+ansible-playbook site.yml -i inventory.yml -e deploy_di=true -e di_deployment_type=container
+```
+
+### 11.6 Pre-deploy / Activate Later
+
+Pre-stage DI on nodes without starting services or registering. Activate only when needed (e.g., during decommission events):
+
+```bash
+# 1. Pre-deploy: install everything but don't start pd-di or register
+ansible-playbook site.yml --tags di -i inventory.yml -e deploy_di=true -e di_activate=false
+
+# 2. Later, activate specific nodes:
+ansible-playbook site.yml --tags di-activate -i inventory.yml \
+  -e deploy_di=true -e di_activate=true --limit "mover101"
+```
+
+### 11.7 Verify DI Deployment
+
+```bash
+# On the DI node
+ssh mover101 "systemctl status pd-di"
+ssh mover101 "firewall-cmd --list-all"
+
+# In Hammerspace
+anvil> node-list --name mover101
+```
+
+### 11.8 Decommission DI Nodes
+
+```bash
+# Dry run first
+ansible-playbook decommission_di.yml -i inventory.yml --limit "mover101" --check
+
+# Execute (runs serial: 1 — one node at a time)
+ansible-playbook decommission_di.yml -i inventory.yml --limit "mover101"
+```
+
+The decommission playbook:
+1. Evacuates data from volumes (configurable via `di_decommission_evacuate_data`)
+2. Deletes volumes from Hammerspace
+3. Removes the node from the cluster
+4. Stops pd-di services on the host
+
+---
+
+## 12. Troubleshooting
 
 ### OCI Inventory Issues
 
@@ -809,11 +1023,11 @@ ansible-playbook site.yml -i inventory.oci.yml --check
 
 ---
 
-## 12. Decommissioning Instances
+## 13. Decommissioning Instances
 
 When terminating GPU instances, you should first remove them from Hammerspace to avoid orphaned nodes and volumes.
 
-### 12.1 Using the Cleanup Script
+### 13.1 Using the Cleanup Script
 
 The `cleanup_instance_nodes.py` script removes nodes and their volumes from Hammerspace.
 
@@ -890,7 +1104,7 @@ Nodes:   10 deleted, 0 failed, 0 skipped
 
 > **Note:** Each volume deletion is a blocking operation — the script waits indefinitely for Hammerspace to fully remove the volume before the worker picks up the next one. With `--parallel 5`, up to 5 volumes are deleted concurrently. If any volume fails to delete, the corresponding node is skipped to prevent data loss.
 
-### 12.2 Cleanup Options
+### 13.2 Cleanup Options
 
 | Option | Description |
 |--------|-------------|
@@ -968,7 +1182,7 @@ python3 cleanup_instance_nodes.py \
   --yes
 ```
 
-### 12.3 Decommission Workflow
+### 13.3 Decommission Workflow
 
 ```
 ┌─────────────────────────┐
@@ -1001,7 +1215,7 @@ python3 cleanup_instance_nodes.py \
 └─────────────────────────┘
 ```
 
-### 12.4 Important Notes
+### 13.4 Important Notes
 
 | Warning | Description |
 |---------|-------------|
@@ -1024,6 +1238,9 @@ python3 cleanup_instance_nodes.py \
 | Precheck only | `ansible-playbook site.yml -i inventory.oci.yml --tags precheck` |
 | Full deploy | `ansible-playbook site.yml -i inventory.oci.yml` |
 | Verify NFS | `ansible-playbook verify_nfs.yml -i inventory.oci.yml` |
+| Deploy DI (host mode) | `ansible-playbook site.yml -i inventory.yml --tags di -e deploy_di=true` |
+| Deploy DI (container) | `ansible-playbook site.yml -i inventory.yml --tags di -e deploy_di=true -e di_deployment_type=container` |
+| Decommission DI node | `ansible-playbook decommission_di.yml -i inventory.yml --limit "mover101"` |
 | Collect GPU fabric | `ansible-playbook collect_gpu_fabric.yml -i inventory.oci.yml` |
 | Assign AZ to volumes | `python3 assign_az_to_volumes.py --host <IP> --gpu-fabric-file gpu_fabric_data.txt` |
 | Assign AZ (explicit) | `python3 assign_az_to_volumes.py --host <IP> --gpu-fabric-file gpu_fabric_data.txt --az-map "FABRIC_OCID=AZ3"` |

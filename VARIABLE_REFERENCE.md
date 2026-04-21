@@ -113,6 +113,13 @@ Used when `use_dynamic_discovery: false`.
 | `hammerspace_node_ip` | `"{{ ansible_default_ipv4.address }}"` | Node IP for Hammerspace registration. |
 | `hammerspace_create_placement_objectives` | `true` | Create placement objectives for volumes. |
 
+## Anvil Overload Protection
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `hammerspace_serial` | `0` | Process N nodes at a time through hammerspace_integration (0 = all in parallel). Use for large deployments. Can also be set via `-e hammerspace_serial=2`. |
+| `hammerspace_volume_add_throttle` | `0` | Limit concurrent volume add POSTs across hosts (0 = no limit). Other tasks remain parallel. |
+
 ## Task Queue Throttling
 
 | Variable | Default | Description |
@@ -281,6 +288,86 @@ Used when `use_dynamic_discovery: false`.
 | `iperf_test_parallel` | `64` | Parallel streams (64 recommended for 200Gbps). |
 | `iperf_min_bandwidth_mbps` | `40000` | Minimum expected bandwidth in Mbits/sec. |
 | `iperf_enforce_bandwidth` | `false` | Fail if bandwidth is below minimum. |
+
+## Data Instantiator (DI) Deployment
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `deploy_di` | `false` | Master switch: enable DI deployment on `di_nodes` group. |
+| `di_activate` | `true` | Activation control: `true` = full deploy; `false` = install only, skip services and registration. Activate later with `--tags di-activate -e di_activate=true`. |
+| `di_auto_export` | `true` | Auto-wire DI node IPs into Tier 0 NFS exports (`no_root_squash`). Eliminates manual `mover_nodes` editing. |
+| `di_deployment_type` | `"host"` | Deployment mode: `"host"` (RPM install) or `"container"` (podman/docker). |
+
+## DI Container Settings
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `di_container_runtime` | `"podman"` | Container runtime: `"podman"` or `"docker"`. |
+| `di_container_base_image` | `"rockylinux:9"` | Base image (must be el9 for pd-di RPMs). |
+| `di_container_image` | `"hammerspace-di:local"` | Built container image name/tag. |
+| `di_container_name` | `"pd-di"` | Container instance name. |
+| `di_container_build_dir` | `"/opt/hammerspace/di-container"` | Build context directory on target. |
+| `di_container_privileged` | `true` | Run container privileged (required for NFS + LTTng). |
+| `di_container_host_network` | `true` | Use host networking (required for ports 9095/9096). |
+| `di_container_restart_policy` | `"unless-stopped"` | Container restart policy. |
+
+## DI Cluster Connection
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `hammerspace_cluster_mgmt_ip` | `"{{ hammerspace_api_host }}"` | Anvil management IP for DI (defaults to Tier0 API host). |
+| `hammerspace_cluster_hostname` | `"data-cluster"` | Hostname added to `/etc/hosts` on DI nodes. |
+
+## DI Package Source
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `di_rpm_source` | `"directory"` | Source mode: `"url"`, `"local"`, `"directory"`. |
+| `di_tarball_url` | *(Hammerspace URL)* | Tarball download URL (when `di_rpm_source == "url"`). |
+| `di_tarball_local_path` | *(undefined)* | Controller-local tarball path (when `di_rpm_source == "local"`). |
+| `di_payload_local_dir` | `"{{ playbook_dir }}/payload"` | Directory with loose RPMs (when `di_rpm_source == "directory"`). |
+| `babeltrace_rpm_url` | *(Rocky Linux URL)* | Babeltrace RPM URL (RedHat only). |
+| `di_add_node_script_url` | *(Hammerspace URL)* | Fallback URL for `add_node.py`. |
+| `di_tmp_dir` | `"/tmp/di_install"` | Temp directory for tarball extraction. |
+
+## DI Node Configuration
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `di_node_netmask_prefix` | `24` | Netmask prefix for `add_node.py -l` flag. |
+| `di_registration_method` | `"script"` | Registration method (`"script"` uses `add_node.py`). |
+| `di_node_name` | `inventory_hostname` | Override per host in inventory. |
+| `di_node_ip` | `ansible_default_ipv4.address` | Override per host in inventory. |
+| `di_node_az` | *(auto-detected)* | Explicit AZ for a DI node. Auto-detected from inventory group names (`AZ1`, `AZ2`, ...) if not set. |
+
+## DI AZ Distribution
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `di_min_az_count` | `2` | Minimum AZs DI nodes should span. Set to `1` to disable. |
+| `di_enforce_az_distribution` | `false` | `true` = fail if below `di_min_az_count`; `false` = warn only. |
+
+## DI Firewall
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `di_firewall_ports` | `[{port: 9095, proto: tcp}, {port: 9096, proto: tcp}]` | Ports for DI communication with Anvil. |
+
+## DI SELinux
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `di_disable_selinux` | `true` | Disable SELinux on RedHat systems. |
+| `di_selinux_reboot` | `true` | Reboot after SELinux changes. |
+
+## DI Decommission
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `di_decommission_evacuate_data` | `true` | Evacuate data before removing volumes. |
+| `di_decommission_stop_services` | `true` | Stop DI services after decommission. |
+| `di_decommission_poll_retries` | `180` | Max poll retries (180 x 10s = 30 min). |
+| `di_decommission_poll_delay` | `10` | Poll delay in seconds. |
 
 ## Vault Variables
 
