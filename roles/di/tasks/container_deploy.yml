@@ -114,21 +114,25 @@
   ansible.builtin.find:
     paths: "{{ di_container_build_dir }}/payload"
     patterns: "pd-di-*.{{ _di_arch }}.rpm"
-  register: _pddi_rpms
+  register: _pddi_rpms_arch
 
 - name: Fall back to any pd-di RPM (arch-agnostic)
   ansible.builtin.find:
     paths: "{{ di_container_build_dir }}/payload"
     patterns: "pd-di-*.rpm"
-  register: _pddi_rpms
-  when: _pddi_rpms.matched == 0
+  register: _pddi_rpms_any
+  when: (_pddi_rpms_arch.matched | default(0)) == 0
+
+- name: Set pd-di RPM match count
+  ansible.builtin.set_fact:
+    _pddi_rpm_count: "{{ (_pddi_rpms_arch.matched | default(0) | int) + (_pddi_rpms_any.matched | default(0) | int) }}"
 
 - name: Fail if no pd-di RPM in payload
   ansible.builtin.fail:
     msg: >-
       No pd-di-*.rpm found in {{ di_container_build_dir }}/payload.
       Check di_tarball_url / di_tarball_local_path.
-  when: _pddi_rpms.matched == 0
+  when: _pddi_rpm_count | int == 0
 
 # ---------------------------------------------------------------------------
 # Build image

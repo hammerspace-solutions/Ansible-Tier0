@@ -94,24 +94,28 @@
     paths: "{{ di_tmp_dir }}"
     patterns: "pd-di-*.{{ _di_arch }}.{{ di_pkg_extension }}"
     recurse: true
-  register: pddi_package_files
+  register: pddi_package_files_arch
 
 - name: Fall back to any pd-di package (arch-agnostic)
   ansible.builtin.find:
     paths: "{{ di_tmp_dir }}"
     patterns: "pd-di-*.{{ di_pkg_extension }}"
     recurse: true
-  register: pddi_package_files
-  when: pddi_package_files.matched == 0
+  register: pddi_package_files_any
+  when: (pddi_package_files_arch.matched | default(0)) == 0
+
+- name: Set pd-di package result
+  ansible.builtin.set_fact:
+    _pddi_files: "{{ pddi_package_files_arch.files if (pddi_package_files_arch.matched | default(0)) > 0 else (pddi_package_files_any.files | default([])) }}"
 
 - name: Fail if no pd-di package found
   ansible.builtin.fail:
-    msg: "No pd-di package (*.{{ di_pkg_extension }}) found in extracted tarball"
-  when: pddi_package_files.matched == 0
+    msg: "No pd-di package (*.{{ di_pkg_extension }}) found in {{ di_tmp_dir }}"
+  when: _pddi_files | length == 0
 
 - name: Set pd-di package path
   ansible.builtin.set_fact:
-    _pddi_pkg_path: "{{ pddi_package_files.files | sort(attribute='path') | last | json_query('path') }}"
+    _pddi_pkg_path: "{{ _pddi_files | sort(attribute='path') | last | json_query('path') }}"
 
 - name: Display pd-di package to install
   ansible.builtin.debug:

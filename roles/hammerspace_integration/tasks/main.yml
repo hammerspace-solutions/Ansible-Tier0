@@ -263,7 +263,6 @@
   loop_control:
     loop_var: volume_config
     label: "{{ volume_config.path }}"
-  throttle: "{{ hammerspace_volume_add_throttle | default(0) }}"
   when: hammerspace_add_volumes | default(true)
 
 # =============================================================================
