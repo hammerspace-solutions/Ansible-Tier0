@@ -1105,6 +1105,7 @@ ss -tlnp | grep -E '2049|111|20048'
 | Discovery + precheck | `ansible-playbook site.yml --tags "discovery,precheck"` |
 | Storage only | `ansible-playbook site.yml --tags "storage"` |
 | NFS only | `ansible-playbook site.yml --tags "nfs"` |
+| NFS exports only | `ansible-playbook site.yml --tags "nfs-exports"` |
 | Hammerspace only | `ansible-playbook site.yml --tags "hammerspace"` |
 | Skip Hammerspace | `ansible-playbook site.yml --skip-tags hammerspace` |
 | Deploy DI nodes | `ansible-playbook site.yml --tags di -e deploy_di=true` |

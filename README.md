@@ -783,6 +783,7 @@ ansible-playbook site.yml
 # Run specific components
 ansible-playbook site.yml --tags raid
 ansible-playbook site.yml --tags nfs
+ansible-playbook site.yml --tags nfs-exports  # Update /etc/exports only (no service restart)
 ansible-playbook site.yml --tags firewall
 ansible-playbook site.yml --tags hammerspace
 ```

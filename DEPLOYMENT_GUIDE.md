@@ -1002,6 +1002,7 @@ mount | grep nvme
 ansible-playbook site.yml -i inventory.oci.yml --tags precheck
 ansible-playbook site.yml -i inventory.oci.yml --tags raid
 ansible-playbook site.yml -i inventory.oci.yml --tags nfs
+ansible-playbook site.yml -i inventory.oci.yml --tags nfs-exports  # Update /etc/exports only
 ansible-playbook site.yml -i inventory.oci.yml --tags hammerspace
 
 # Skip specific roles
@@ -1230,6 +1231,7 @@ python3 cleanup_instance_nodes.py \
 | Dry run | `ansible-playbook site.yml -i inventory.oci.yml --check` |
 | Precheck only | `ansible-playbook site.yml -i inventory.oci.yml --tags precheck` |
 | Full deploy | `ansible-playbook site.yml -i inventory.oci.yml` |
+| Update NFS exports only | `ansible-playbook site.yml -i inventory.oci.yml --tags nfs-exports` |
 | Verify NFS | `ansible-playbook verify_nfs.yml -i inventory.oci.yml` |
 | Deploy DI (host mode) | `ansible-playbook site.yml -i inventory.yml --tags di -e deploy_di=true` |
 | Deploy DI (container) | `ansible-playbook site.yml -i inventory.yml --tags di -e deploy_di=true -e di_deployment_type=container` |
