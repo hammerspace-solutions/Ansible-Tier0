@@ -374,18 +374,11 @@ For deployments with many nodes (10+), throttle API calls to avoid overwhelming 
 ```bash
 # Process 2 nodes at a time (serial play)
 ansible-playbook site.yml -i inventory.oci.yml -e hammerspace_serial=2
-
-# Or limit concurrent volume adds to 3 (finer-grained)
-ansible-playbook site.yml -i inventory.oci.yml -e hammerspace_volume_add_throttle=3
-
-# Both together: 5 nodes per batch, max 2 concurrent volume adds
-ansible-playbook site.yml -i inventory.oci.yml -e hammerspace_serial=5 -e hammerspace_volume_add_throttle=2
 ```
 
 Or set persistently in `vars/main.yml`:
 ```yaml
 hammerspace_serial: 2                  # Process 2 nodes at a time (0 = all parallel)
-hammerspace_volume_add_throttle: 3     # Max 3 concurrent volume adds (0 = no limit)
 ```
 
 ### Deployment Progress

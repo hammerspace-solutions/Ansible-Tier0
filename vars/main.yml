@@ -374,23 +374,14 @@ hammerspace_create_shares: false
 # ============================================================================
 # Anvil Overload Protection
 # ============================================================================
-# Two options to prevent overwhelming Anvil with concurrent volume adds
-# (e.g., 10 nodes x 4 volumes = 40 API calls). Use one or both.
+# Prevents overwhelming Anvil with concurrent volume adds
+# (e.g., 10 nodes x 4 volumes = 40 API calls).
 #
-# OPTION A: Serial play (coarse-grained)
-#   Processes N nodes at a time through the entire hammerspace_integration role.
-#   All volumes for a batch of nodes complete before the next batch starts.
-#   Set to 0 to disable (all nodes in parallel, default/original behavior).
-#   Example: hammerspace_serial: 2  (2 nodes at a time)
-#   Can also be set via command line: -e hammerspace_serial=2
+# Serial play: processes N nodes at a time through hammerspace_integration.
+# All volumes for a batch of nodes complete before the next batch starts.
+# Set to 0 to disable (all nodes in parallel, default/original behavior).
+# Can also be set via command line: -e hammerspace_serial=2
 hammerspace_serial: 0
-
-# OPTION B: Volume add throttle (fine-grained)
-#   Limits how many hosts can add a volume concurrently (Ansible 'throttle').
-#   Other tasks (node registration, etc.) still run in parallel.
-#   Set to 0 to disable (no throttle, default/original behavior).
-#   Example: hammerspace_volume_add_throttle: 3  (3 concurrent volume adds)
-hammerspace_volume_add_throttle: 0
 
 # ============================================================================
 # Task Queue Throttling (from Hammerspace Engineering)

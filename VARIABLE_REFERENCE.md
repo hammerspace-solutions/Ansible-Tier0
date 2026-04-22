@@ -118,7 +118,6 @@ Used when `use_dynamic_discovery: false`.
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `hammerspace_serial` | `0` | Process N nodes at a time through hammerspace_integration (0 = all in parallel). Use for large deployments. Can also be set via `-e hammerspace_serial=2`. |
-| `hammerspace_volume_add_throttle` | `0` | Limit concurrent volume add POSTs across hosts (0 = no limit). Other tasks remain parallel. |
 
 ## Task Queue Throttling
 

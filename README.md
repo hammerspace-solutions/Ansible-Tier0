@@ -27,7 +27,7 @@ Tier 0 transforms existing local NVMe storage on GPU servers into ultra-fast, pe
 - **Node Registration**: Automatically registers storage servers via Anvil REST API
 - **Volume Management**: Adds storage volumes with configurable thresholds and protection settings
 - **Task Queue Throttling**: Prevents API overload by monitoring queued tasks (configurable min/max thresholds)
-- **Anvil Overload Protection**: Two options for large deployments — serialized play (`hammerspace_serial`) and volume add throttle (`hammerspace_volume_add_throttle`)
+- **Anvil Overload Protection**: Serialized play (`hammerspace_serial`) for large deployments to prevent overwhelming Anvil
 - **Volume Groups**: Creates volume groups and adds volumes to existing groups
 - **Share Management**: Creates shares with configurable export options
 - **Share Objectives**: Applies availability/durability objectives to shares
@@ -1459,11 +1459,7 @@ hammerspace_shares:
 
 ### Anvil Overload Protection (Large Deployments)
 
-When deploying many nodes (10+) with multiple volumes each, concurrent API calls can overwhelm Anvil. Two options are available (use one or both):
-
-**Option A: Serialized play (`hammerspace_serial`)** — coarse-grained
-
-Processes N nodes at a time through the entire hammerspace_integration role. All volumes for a batch of nodes complete before the next batch starts.
+When deploying many nodes (10+) with multiple volumes each, concurrent API calls can overwhelm Anvil. Use `hammerspace_serial` to process N nodes at a time through the entire hammerspace_integration role. All volumes for a batch of nodes complete before the next batch starts.
 
 ```yaml
 # vars/main.yml
@@ -1474,28 +1470,6 @@ Or via command line:
 ```bash
 ansible-playbook site.yml -e hammerspace_serial=2
 ```
-
-**Option B: Volume add throttle (`hammerspace_volume_add_throttle`)** — fine-grained
-
-Limits how many hosts can POST a volume add concurrently. Node registration and other tasks still run in parallel.
-
-```yaml
-# vars/main.yml
-hammerspace_volume_add_throttle: 3    # Max 3 concurrent volume adds (0 = no limit, default)
-```
-
-**Combining both options:**
-
-```yaml
-# Process 5 nodes at a time, but only 2 volume POSTs concurrently within each batch
-hammerspace_serial: 5
-hammerspace_volume_add_throttle: 2
-```
-
-| Option | Scope | Best For |
-|--------|-------|----------|
-| `hammerspace_serial: N` | Entire integration role | Small clusters, conservative approach |
-| `hammerspace_volume_add_throttle: N` | Volume adds only | Large clusters, maximize parallelism for non-volume work |
 
 ### Run Integration Only
 
