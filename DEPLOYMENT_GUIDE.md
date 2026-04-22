@@ -1234,6 +1234,8 @@ python3 cleanup_instance_nodes.py \
 | Deploy DI (host mode) | `ansible-playbook site.yml -i inventory.yml --tags di -e deploy_di=true` |
 | Deploy DI (container) | `ansible-playbook site.yml -i inventory.yml --tags di -e deploy_di=true -e di_deployment_type=container` |
 | Decommission DI node | `ansible-playbook decommission_di.yml -i inventory.yml --limit "mover101"` |
+| Reset Tier 0 host | `ansible-playbook reset-tier0-host.yml -i inventory.yml --limit "node01" -e reset_confirm=true` |
+| Reset + blkdiscard | `ansible-playbook reset-tier0-host.yml -i inventory.yml --limit "node01" -e reset_confirm=true -e reset_run_blkdiscard=true` |
 | Collect GPU fabric | `ansible-playbook collect_gpu_fabric.yml -i inventory.oci.yml` |
 | Assign AZ to volumes | `python3 assign_az_to_volumes.py --host <IP> --gpu-fabric-file gpu_fabric_data.txt` |
 | Assign AZ (explicit) | `python3 assign_az_to_volumes.py --host <IP> --gpu-fabric-file gpu_fabric_data.txt --az-map "FABRIC_OCID=AZ3"` |

@@ -76,6 +76,7 @@ ansible-storage-setup/
 ├── inventory.aws.yml        # AWS EC2 dynamic inventory (auto-discovery)
 ├── inventory.gcp.yml        # GCP Compute Engine dynamic inventory (auto-discovery)
 ├── site.yml                 # Main playbook (Tier0 + optional DI)
+├── reset-tier0-host.yml     # Full host reset (Hammerspace + NFS + RAID + drives)
 ├── decommission_di.yml      # DI node decommission playbook
 ├── preflight_check.yml      # Compare inventory with Hammerspace (find new instances)
 ├── deploy_new_instances.sh  # Automated deployment script
@@ -2170,6 +2171,60 @@ di_node_netmask_prefix: 24
 di_decommission_evacuate_data: true
 di_decommission_stop_services: true
 ```
+
+## Decommission & Reset Tools
+
+Three tools for different teardown scenarios:
+
+| Tool | Scenario | SSH Required |
+|------|----------|:---:|
+| `reset-tier0-host.yml` | Full host reset — returns node to bare-metal state | Yes |
+| `cleanup_instance_nodes.py` | Hammerspace-only cleanup — dead/terminated hosts | No |
+| `decommission_di.yml` | DI node removal — evacuate data + unregister | Yes |
+
+### reset-tier0-host.yml — Full Host Reset
+
+Reverses everything `site.yml` deploys: removes the node from Hammerspace, tears down mount protection, stops NFS, unmounts filesystems, destroys RAID arrays, and wipes drive superblocks. Uses `cleanup_instance_nodes.py` internally for Phase 1 (API cleanup).
+
+```bash
+# Standard reset (requires explicit confirmation)
+ansible-playbook reset-tier0-host.yml -i inventory.yml \
+  --limit tier0-node-01 -e reset_confirm=true
+
+# Demo speed-run (also blkdiscard NVMe drives for fastest re-provision)
+ansible-playbook reset-tier0-host.yml -i inventory.yml \
+  --limit tier0-node-01 -e reset_confirm=true -e reset_run_blkdiscard=true
+
+# Full reset including /hammerspace directory removal
+ansible-playbook reset-tier0-host.yml -i inventory.yml \
+  --limit tier0-node-01 -e reset_confirm=true -e reset_remove_mount_dirs=true
+
+# Skip Hammerspace API removal (e.g., Anvil is unreachable)
+ansible-playbook reset-tier0-host.yml -i inventory.yml \
+  --limit tier0-node-01 -e reset_confirm=true -e reset_hammerspace_cleanup=false
+```
+
+**Reset phases:**
+
+| Phase | Action |
+|-------|--------|
+| 1 | Remove node + volumes from Hammerspace (via `cleanup_instance_nodes.py`) |
+| 2 | Kill mount protection guards + remount watchdog |
+| 3 | Stop NFS services |
+| 4 | Unexport, stop automount units, unmount, remove fstab entries |
+| 5 | Destroy RAID arrays, zero superblocks, wipe signatures, optional blkdiscard |
+| 6 | Remove systemd unit files + mdadm.conf entries |
+| 7 | Remove mount directories, verify clean state |
+
+**Variables:**
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `reset_confirm` | `false` | Safety gate — must be `true` to proceed |
+| `reset_hammerspace_cleanup` | `true` | Remove node/volumes from Hammerspace API |
+| `reset_remove_mount_dirs` | `false` | Remove `/hammerspace` directory tree |
+| `reset_run_blkdiscard` | `false` | Run blkdiscard on NVMe drives (fastest re-provision) |
+| `reset_mount_root` | `"/hammerspace"` | Root path for Tier 0 mounts |
 
 ## Customer Deployment Guide
 

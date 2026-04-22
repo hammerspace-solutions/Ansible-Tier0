@@ -368,6 +368,19 @@ Used when `use_dynamic_discovery: false`.
 | `di_decommission_poll_retries` | `180` | Max poll retries (180 x 10s = 30 min). |
 | `di_decommission_poll_delay` | `10` | Poll delay in seconds. |
 
+## Tier 0 Host Reset (reset-tier0-host.yml)
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `reset_confirm` | `false` | Safety gate — must be `true` to proceed. |
+| `reset_hammerspace_cleanup` | `true` | Remove node/volumes from Hammerspace API before local teardown. |
+| `reset_mount_root` | `"/hammerspace"` | Root path for Tier 0 mounts. |
+| `reset_remove_mount_dirs` | `false` | Remove mount point directories and `/hammerspace` root. |
+| `reset_run_blkdiscard` | `false` | Run blkdiscard on NVMe drives (fastest re-provision). |
+| `reset_extra_mount_paths` | `[]` | Additional mount paths to tear down. |
+| `reset_extra_md_devices` | `[]` | Additional md devices to destroy. |
+| `reset_extra_member_drives` | `[]` | Additional member drives to wipe. |
+
 ## Vault Variables
 
 Stored in `vars/vault.yml` (encrypt with `ansible-vault encrypt vars/vault.yml`).

@@ -1110,6 +1110,8 @@ ss -tlnp | grep -E '2049|111|20048'
 | Deploy DI nodes | `ansible-playbook site.yml --tags di -e deploy_di=true` |
 | Deploy DI (container) | `ansible-playbook site.yml --tags di -e deploy_di=true -e di_deployment_type=container` |
 | Decommission DI node | `ansible-playbook decommission_di.yml --limit "mover101"` |
+| Reset Tier 0 host | `ansible-playbook reset-tier0-host.yml --limit "node01" -e reset_confirm=true` |
+| Reset + blkdiscard | `ansible-playbook reset-tier0-host.yml --limit "node01" -e reset_confirm=true -e reset_run_blkdiscard=true` |
 | Verbose output | `ansible-playbook site.yml -vvv` |
 | Install offline pkgs | `ansible-playbook install_offline_packages.yml` |
 
