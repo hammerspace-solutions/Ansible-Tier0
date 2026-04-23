@@ -6,7 +6,7 @@
   ansible.builtin.set_fact:
     _di_node_name: "{{ di_node_name | default(inventory_hostname) }}"
     _di_node_ip: "{{ di_node_ip | default(ansible_default_ipv4.address | default('')) }}"
-    _hs_api_base: "https://{{ hammerspace_api_host }}:{{ hammerspace_api_port | default(8443) }}/mgmt/v1.2/rest"
+    _hs_api_base: "https://{{ hammerspace_cluster_mgmt_ip | default(hammerspace_api_host) }}:{{ hammerspace_api_port | default(8443) }}/mgmt/v1.2/rest"
 
 # Always use curl for API requests (uri module has SSL/compatibility issues)
 - name: Set API method
