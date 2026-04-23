@@ -16,7 +16,10 @@
 
 - name: Set curl usage flag
   ansible.builtin.set_fact:
-    _hs_use_curl: "{{ (python_version_check.stdout | default('3.9') is version('3.13', '>=')) }}"
+    _hs_use_curl: >-
+      {{ (python_version_check.stdout | default('', true) | trim)
+         | default('3.9', true)
+         is version('3.13', '>=') }}
 
 # Check if node is already registered
 - name: Check if DI node already exists in Hammerspace

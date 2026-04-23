@@ -4,7 +4,7 @@
 - name: "Decommission volume '{{ _volume.name }}'"
   ansible.builtin.include_tasks: _api_request.yml
   vars:
-    _api_request_url: "{{ _hs_api_base }}/volumes/{{ _volume.name | urlencode }}/decommission"
+    _api_request_url: "{{ _hs_api_base }}/storage-volumes/{{ _volume.name | urlencode }}/decommission"
     _api_request_method: POST
     _api_request_body:
       evacuateData: "{{ di_decommission_evacuate_data | default(true) }}"
@@ -35,7 +35,7 @@
 - name: "Remove volume '{{ _volume.name }}'"
   ansible.builtin.include_tasks: _api_request.yml
   vars:
-    _api_request_url: "{{ _hs_api_base }}/volumes/{{ _volume.name | urlencode }}"
+    _api_request_url: "{{ _hs_api_base }}/storage-volumes/{{ _volume.name | urlencode }}"
     _api_request_method: DELETE
     _api_request_save_headers: true
 
