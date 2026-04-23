@@ -8,21 +8,10 @@
     _di_node_ip: "{{ di_node_ip | default(ansible_default_ipv4.address | default('')) }}"
     _hs_api_base: "https://{{ hammerspace_api_host }}:{{ hammerspace_api_port | default(8443) }}/mgmt/v1.2/rest"
 
-# Detect whether to use curl or uri module
-- name: Check Python version for uri module compatibility
-  ansible.builtin.command:
-    cmd: python3 -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')"
-  register: python_version_check
-  changed_when: false
-  failed_when: false
-  delegate_to: localhost
-
-- name: Set curl usage flag
+# Always use curl for API requests (uri module has SSL/compatibility issues)
+- name: Set API method
   ansible.builtin.set_fact:
-    _hs_use_curl: >-
-      {{ (python_version_check.stdout | default('', true) | trim)
-         | default('3.9', true)
-         is version('3.13', '>=') }}
+    _hs_use_curl: true
 
 # Check if node exists
 - name: Check if DI node exists in Hammerspace
