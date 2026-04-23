@@ -25,6 +25,13 @@
     _di_node_registered: "{{ (_api_response.status | int) == 200 }}"
     _di_node_uuid: "{{ (_api_response.json.uoid.uuid | default('')) if (_api_response.status | int) == 200 else '' }}"
 
+- name: Display node lookup result
+  ansible.builtin.debug:
+    msg: >-
+      Node '{{ _di_node_name }}': {{ 'FOUND' if _di_node_registered | bool else 'NOT FOUND' }}
+      {{ '(UUID: ' ~ _di_node_uuid ~ ')' if _di_node_uuid | length > 0 else '(no UUID found in response)' }}
+      API status: {{ _api_response.status }}
+
 - name: Skip decommission if node not registered
   ansible.builtin.debug:
     msg: "DI node '{{ _di_node_name }}' is not registered in Hammerspace - nothing to decommission"
@@ -70,19 +77,29 @@
         label: "{{ _volume.name }}"
       when: _node_volumes | length > 0
 
-    # Remove node from Hammerspace (DELETE by UUID, same as cleanup_instance_nodes.py)
-    - name: Remove DI node from Hammerspace
+    # Remove node from Hammerspace (by UUID if available, fall back to name)
+    - name: "Remove DI node from Hammerspace ({{ 'by UUID' if _di_node_uuid | length > 0 else 'by name' }})"
       ansible.builtin.include_tasks: _api_request.yml
       vars:
-        _api_request_url: "{{ _hs_api_base }}/nodes/{{ _di_node_uuid }}"
+        _api_request_url: "{{ _hs_api_base }}/nodes/{{ _di_node_uuid if _di_node_uuid | length > 0 else (_di_node_name | urlencode) }}"
         _api_request_method: DELETE
         _api_request_save_headers: true
 
     - name: Check node removal result
       ansible.builtin.debug:
         msg: >-
-          Node removal: {{ 'success' if (_api_response.status | int) in [200, 202, 204]
-          else 'failed with status ' ~ _api_response.status }}
+          Node '{{ _di_node_name }}' removal:
+          {{ 'SUCCESS' if (_api_response.status | int) in [200, 202, 204]
+          else 'FAILED (HTTP ' ~ _api_response.status ~ ')' }}.
+          DELETE URL: /nodes/{{ _di_node_uuid if _di_node_uuid | length > 0 else _di_node_name }}
+
+    - name: Fail if node removal failed
+      ansible.builtin.fail:
+        msg: >-
+          Failed to remove DI node '{{ _di_node_name }}' from Hammerspace
+          (HTTP {{ _api_response.status }}). Check the Anvil logs or remove manually:
+          anvil> node-delete --name {{ _di_node_name }}
+      when: (_api_response.status | int) not in [200, 202, 204, 404]
 
     # Poll for node removal task completion if async
     - name: Poll node removal task
