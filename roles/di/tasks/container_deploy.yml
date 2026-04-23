@@ -31,6 +31,8 @@
       {{ di_container_systemd_flag }}
       {{ '--privileged' if di_container_privileged | bool else '' }}
       {{ '--network host' if di_container_host_network | bool else '' }}
+      {{ '--memory ' ~ di_container_memory if di_container_memory | default('') | length > 0 else '' }}
+      {{ '--cpus ' ~ di_container_cpus if di_container_cpus | default('') | length > 0 else '' }}
       --restart {{ di_container_restart_policy }}
       --cap-add SYS_ADMIN --cap-add NET_ADMIN --cap-add SYS_PTRACE
       --tmpfs /run --tmpfs /tmp
