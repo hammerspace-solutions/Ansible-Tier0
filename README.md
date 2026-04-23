@@ -76,6 +76,7 @@ ansible-storage-setup/
 ├── inventory.aws.yml        # AWS EC2 dynamic inventory (auto-discovery)
 ├── inventory.gcp.yml        # GCP Compute Engine dynamic inventory (auto-discovery)
 ├── site.yml                 # Main playbook (Tier0 + optional DI)
+├── build_di_image.yml       # Build DI container images and export as tar
 ├── reset-tier0-host.yml     # Full host reset (Hammerspace + NFS + RAID + drives)
 ├── decommission_di.yml      # DI node decommission playbook
 ├── preflight_check.yml      # Compare inventory with Hammerspace (find new instances)
@@ -2031,6 +2032,43 @@ ls payload/
   add_node.py
 ```
 
+### Pre-built Container Images
+
+For container mode, you can build the image once and deploy the tar to many nodes — avoiding a full build on every GPU node.
+
+**Step 1: Build image tars (once per architecture):**
+
+```bash
+# Build on an x86_64 host
+ansible-playbook build_di_image.yml -i inventory.yml --limit build-host-x86
+
+# Build on an aarch64 host
+ansible-playbook build_di_image.yml -i inventory.yml --limit build-host-arm
+```
+
+This produces `payload/hammerspace-di-x86_64.tar` and/or `payload/hammerspace-di-aarch64.tar`.
+
+**Step 2: Deploy using tar (fast — no build on target):**
+
+```yaml
+# vars/main.yml
+di_image_source: "local"
+di_image_local_path: "{{ playbook_dir }}/payload/hammerspace-di-{{ ansible_architecture }}.tar"
+```
+
+```bash
+ansible-playbook site.yml -i inventory.yml --tags di -e deploy_di=true
+```
+
+The playbook auto-selects the correct architecture tar based on each target node.
+
+| Source | Setting | Speed | Use Case |
+|--------|---------|-------|----------|
+| Build (default) | `di_image_source: "build"` | Slow (builds on each node) | First deployment, single node |
+| Local tar | `di_image_source: "local"` | Fast (copy + load) | Multi-node rollout, air-gapped |
+| URL tar | `di_image_source: "url"` | Fast (download + load) | Centralized image hosting |
+| Registry | `di_image_source: "registry"` | Fast (pull) | Container registry available |
+
 ### DI Task Execution Order
 
 When DI is enabled, the `di` role runs on `di_nodes` after the Tier 0 storage setup. The role's `main.yml` orchestrator dispatches to these sub-tasks:
@@ -2156,6 +2194,9 @@ di_auto_export: true
 
 # Deployment mode
 di_deployment_type: "host"             # host | container
+
+# Container image source (build on target or load pre-built tar)
+di_image_source: "build"               # build | local | url | registry
 
 # Package source (both x86_64 and aarch64 RPMs can coexist in payload/)
 di_rpm_source: "directory"             # directory | url | local

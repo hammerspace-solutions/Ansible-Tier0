@@ -309,6 +309,10 @@ Used when `use_dynamic_discovery: false`.
 | `di_container_privileged` | `true` | Run container privileged (required for NFS + LTTng). |
 | `di_container_host_network` | `true` | Use host networking (required for ports 9095/9096). |
 | `di_container_restart_policy` | `"unless-stopped"` | Container restart policy. |
+| `di_image_source` | `"build"` | Image source: `"build"` (Containerfile on target), `"local"` (tar from controller), `"url"` (download tar), `"registry"` (pull from registry). |
+| `di_image_local_path` | *(undefined)* | Path to image tar on controller (when `di_image_source == "local"`). |
+| `di_image_url` | *(undefined)* | URL to download image tar (when `di_image_source == "url"`). |
+| `di_image_registry_ref` | *(undefined)* | Registry reference to pull (when `di_image_source == "registry"`). |
 
 ## DI Cluster Connection
 

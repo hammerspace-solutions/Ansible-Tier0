@@ -922,6 +922,7 @@ deploy_di: true
 di_activate: true                  # false = pre-deploy only, activate later
 di_auto_export: true               # auto-add DI IPs to Tier 0 NFS exports
 di_deployment_type: "host"         # or "container"
+di_image_source: "build"          # "local" to load pre-built tar (faster)
 di_rpm_source: "directory"         # use payload/ directory
 hammerspace_cluster_hostname: "data-cluster"
 ```
@@ -935,6 +936,12 @@ ansible-playbook site.yml --tags di -e deploy_di=true
 
 # Target a specific DI node
 ansible-playbook site.yml --tags di --limit "mover101" -e deploy_di=true
+
+# Container mode with pre-built image (no build on target):
+# 1. Build tar first: ansible-playbook build_di_image.yml --limit <build-host>
+# 2. Deploy from tar:
+ansible-playbook site.yml --tags di -e deploy_di=true \
+  -e di_deployment_type=container -e di_image_source=local
 ```
 
 ### 13.4 Pre-deploy / Activate Later
@@ -1110,6 +1117,8 @@ ss -tlnp | grep -E '2049|111|20048'
 | Skip Hammerspace | `ansible-playbook site.yml --skip-tags hammerspace` |
 | Deploy DI nodes | `ansible-playbook site.yml --tags di -e deploy_di=true` |
 | Deploy DI (container) | `ansible-playbook site.yml --tags di -e deploy_di=true -e di_deployment_type=container` |
+| Build DI image tar | `ansible-playbook build_di_image.yml --limit <build-host>` |
+| Deploy DI (pre-built tar) | `ansible-playbook site.yml --tags di -e deploy_di=true -e di_deployment_type=container -e di_image_source=local` |
 | Decommission DI node | `ansible-playbook decommission_di.yml --limit "mover101"` |
 | Reset Tier 0 host | `ansible-playbook reset-tier0-host.yml --limit "node01" -e reset_confirm=true` |
 | Reset + blkdiscard | `ansible-playbook reset-tier0-host.yml --limit "node01" -e reset_confirm=true -e reset_run_blkdiscard=true` |

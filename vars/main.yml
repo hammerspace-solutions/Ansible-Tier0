@@ -833,6 +833,26 @@ di_container_privileged: true
 di_container_host_network: true
 di_container_restart_policy: "unless-stopped"
 
+# Container image source:
+#   "build"    (default) — build from Containerfile + RPMs on each target host
+#   "local"    — copy a saved image tarball from di_image_local_path on the controller
+#   "url"      — download a saved image tarball from di_image_url
+#   "registry" — pull from a container registry ref di_image_registry_ref
+#
+# To create image tars:
+#   ansible-playbook build_di_image.yml --limit <build-host>
+# This produces payload/hammerspace-di-<arch>.tar
+di_image_source: "build"
+
+# When di_image_source == "url"
+# di_image_url: "https://example.com/hammerspace-di-{{ ansible_architecture }}.tar"
+
+# When di_image_source == "local" (path on the Ansible controller)
+# di_image_local_path: "{{ playbook_dir }}/payload/hammerspace-di-{{ ansible_architecture }}.tar"
+
+# When di_image_source == "registry"
+# di_image_registry_ref: "registry.example.com/hammerspace-di:{{ ansible_architecture }}"
+
 # ============================================================================
 # DI Hammerspace Cluster Connection
 # ============================================================================

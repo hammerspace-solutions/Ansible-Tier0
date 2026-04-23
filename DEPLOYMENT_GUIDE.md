@@ -875,8 +875,13 @@ ansible-playbook site.yml -i inventory.yml --tags di -e deploy_di=true
 # Target specific DI node
 ansible-playbook site.yml -i inventory.yml --tags di --limit "mover101" -e deploy_di=true
 
-# Container mode
+# Container mode (build on each node)
 ansible-playbook site.yml -i inventory.yml -e deploy_di=true -e di_deployment_type=container
+
+# Container mode with pre-built image tar (fast — no build on target)
+# First build the tar: ansible-playbook build_di_image.yml --limit <build-host>
+ansible-playbook site.yml -i inventory.yml -e deploy_di=true \
+  -e di_deployment_type=container -e di_image_source=local
 ```
 
 ### 11.6 Pre-deploy / Activate Later
@@ -1235,6 +1240,8 @@ python3 cleanup_instance_nodes.py \
 | Verify NFS | `ansible-playbook verify_nfs.yml -i inventory.oci.yml` |
 | Deploy DI (host mode) | `ansible-playbook site.yml -i inventory.yml --tags di -e deploy_di=true` |
 | Deploy DI (container) | `ansible-playbook site.yml -i inventory.yml --tags di -e deploy_di=true -e di_deployment_type=container` |
+| Build DI image tar | `ansible-playbook build_di_image.yml -i inventory.yml --limit <build-host>` |
+| Deploy DI (pre-built tar) | `ansible-playbook site.yml -i inventory.yml --tags di -e deploy_di=true -e di_deployment_type=container -e di_image_source=local` |
 | Decommission DI node | `ansible-playbook decommission_di.yml -i inventory.yml --limit "mover101"` |
 | Reset Tier 0 host | `ansible-playbook reset-tier0-host.yml -i inventory.yml --limit "node01" -e reset_confirm=true` |
 | Reset + blkdiscard | `ansible-playbook reset-tier0-host.yml -i inventory.yml --limit "node01" -e reset_confirm=true -e reset_run_blkdiscard=true` |

@@ -36,8 +36,11 @@ RUN if [ -f /opt/payload/add_node.py ]; then \
         install -m 0755 /opt/payload/add_node.py /usr/local/bin/add_node.py ; \
     fi
 
-# Enable the DI services so `systemctl start pd-di` inside the container succeeds.
-RUN systemctl enable lttng-sessiond pd-di-lttng-recorder pd-di || true
+# Enable the lttng side-services so they're up when pd-di starts.
+# pd-di itself is NOT enabled here: it needs /opt/pd/di (the DATA_MOVER UUID)
+# to exist before it can start, and that file is created by add_node.py at
+# registration time. The role enables+starts pd-di after registration.
+RUN systemctl enable lttng-sessiond pd-di-lttng-recorder || true
 
 STOPSIGNAL SIGRTMIN+3
 EXPOSE 9095/tcp 9096/tcp
