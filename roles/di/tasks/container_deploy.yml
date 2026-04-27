@@ -53,6 +53,18 @@
 # on a fresh container.
 # ---------------------------------------------------------------------------
 
+- name: Patch add_node.py to use ignoreIpConflicts (for co-located Tier 0 + DI)
+  ansible.builtin.command:
+    cmd: >-
+      {{ di_container_runtime }} exec {{ di_container_name }}
+      sed -i "s|endpoint='nodes'|endpoint='nodes?ignoreIpConflicts=true'|"
+      /usr/local/bin/add_node.py
+  changed_when: true
+  failed_when: false
+  when:
+    - di_ignore_ip_conflicts | default(true) | bool
+    - not (node_already_registered | default(false) | bool)
+
 - name: Register DI node with Hammerspace (via add_node.py inside container)
   ansible.builtin.command:
     cmd: >-
