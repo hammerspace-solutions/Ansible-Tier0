@@ -432,6 +432,17 @@ hammerspace_enable_az_mapping: false
 hammerspace_apply_az_labels: false
 hammerspace_default_az: "AZ1"
 
+# GPU Fabric AZ Detection (for OCI GPU instances)
+# Automatically determines AZ from the GPU memory fabric OCID.
+# Instances sharing the same GPU fabric get the same AZ number.
+# Learns existing fabric→AZ mappings from Hammerspace volume names
+# and gpu_fabric_data.txt (if present).
+hammerspace_gpu_fabric_az: false
+
+# Update gpu_fabric_data.txt with this node's fabric mapping
+# (so future nodes can learn the mapping without querying all volumes)
+hammerspace_gpu_fabric_az_update_file: true
+
 # Example: Set node name with AZ prefix
 # hammerspace_node_name: "AZ1:tier0-node-01"
 
@@ -833,6 +844,12 @@ di_container_privileged: true
 di_container_host_network: true
 di_container_restart_policy: "unless-stopped"
 
+# Container resource limits (empty = no limit, uses all host resources)
+# Memory: "2g", "4g", "8g", etc. DI typically needs 2-4GB.
+# CPUs: "2", "4", etc. Number of host CPUs the container can use.
+di_container_memory: "4g"
+di_container_cpus: ""
+
 # Container image source:
 #   "build"    (default) — build from Containerfile + RPMs on each target host
 #   "local"    — copy a saved image tarball from di_image_local_path on the controller
@@ -904,9 +921,14 @@ di_node_netmask_prefix: 24
 # Registration method: "script" uses add_node.py
 di_registration_method: "script"
 
-# Default node name (override per host with di_node_name in inventory)
-# Falls back to inventory_hostname if not set
-# di_node_name: "my-di-node"
+# DI node name in Hammerspace. Defaults to hostname + "-mover" to avoid
+# collision with the Tier 0 storage node when co-located on the same host.
+# Override per host in inventory if needed.
+di_node_name: "{{ inventory_hostname }}-mover"
+
+# Allow DI and Tier 0 to share the same IP address (co-located deployment).
+# Patches add_node.py to use ?ignoreIpConflicts=true when registering.
+di_ignore_ip_conflicts: true
 
 # Default node IP (override per host with di_node_ip in inventory)
 # Falls back to ansible_default_ipv4.address if not set
@@ -960,6 +982,9 @@ di_decommission_evacuate_data: true
 
 # Whether to stop DI services after decommission
 di_decommission_stop_services: true
+
+# Clean up local installation (RPMs, containers, config files, /opt/pd)
+di_decommission_cleanup: true
 
 # Polling settings for async task completion
 di_decommission_poll_retries: 180
