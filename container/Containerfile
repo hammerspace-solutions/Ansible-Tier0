@@ -29,7 +29,11 @@ RUN dnf -y install dnf-plugins-core && \
 # Payload: pd-di + runtime-dep RPMs + add_node.py, staged by the role.
 COPY payload/ /opt/payload/
 
-RUN dnf -y install /opt/payload/*.rpm && dnf clean all
+# Install only RPMs matching the container architecture (+ noarch)
+RUN ARCH=$(uname -m) && \
+    RPM_FILES=$(ls /opt/payload/*.${ARCH}.rpm /opt/payload/*.noarch.rpm 2>/dev/null) && \
+    if [ -n "$RPM_FILES" ]; then dnf -y install $RPM_FILES && dnf clean all; \
+    else echo "WARNING: No RPMs found for arch ${ARCH}"; fi
 
 # add_node.py may or may not be in the tarball; role ensures it ends up in payload.
 RUN if [ -f /opt/payload/add_node.py ]; then \
