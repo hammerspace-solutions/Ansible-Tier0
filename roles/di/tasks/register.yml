@@ -74,10 +74,10 @@
           includes add_node.py or place it at /usr/local/bin/add_node.py
       when: _add_node_path == 'not_found'
 
-    - name: Patch add_node.py to use ignoreIpConflicts (for co-located Tier 0 + DI)
+    - name: Patch add_node.py POST to use ignoreIpConflicts (for co-located Tier 0 + DI)
       ansible.builtin.command:
         cmd: >-
-          sed -i "s|endpoint='nodes'|endpoint='nodes?ignoreIpConflicts=true'|"
+          sed -i "/def post/,/def [a-z]/s|endpoint='nodes'|endpoint='nodes?ignoreIpConflicts=true'|"
           {{ _add_node_path }}
       changed_when: true
       failed_when: false
