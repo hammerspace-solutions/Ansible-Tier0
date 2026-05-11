@@ -823,7 +823,7 @@ di_auto_export: true
 # ============================================================================
 #   host      - Install packages directly on the target OS (default)
 #   container - Build a container image on the target and run pd-di inside it
-di_deployment_type: "host"
+di_deployment_type: "container"
 
 # Container runtime (only used when di_deployment_type == "container")
 # Supported: podman, docker
