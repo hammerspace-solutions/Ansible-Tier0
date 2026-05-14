@@ -253,7 +253,9 @@
       ansible.builtin.set_fact:
         nvme_devices: >-
           {{
-            nvme_all_devices | default([]) | rejectattr('name', 'equalto', boot_device)
+            nvme_all_devices | default([])
+            | rejectattr('name', 'in', _protected_disks | default([]))
+            | rejectattr('name', 'equalto', boot_device)
             | rejectattr('name', 'in', nvme_exclude_devices | default([]))
             | rejectattr('device', 'in', nvme_exclude_paths | default([]))
             | rejectattr('serial', 'in', nvme_exclude_serials | default([]))
@@ -379,7 +381,9 @@
       ansible.builtin.set_fact:
         scsi_devices: >-
           {{
-            scsi_all_devices | default([]) | rejectattr('name', 'equalto', boot_device)
+            scsi_all_devices | default([])
+            | rejectattr('name', 'in', _protected_disks | default([]))
+            | rejectattr('name', 'equalto', boot_device)
             | rejectattr('name', 'in', scsi_exclude_devices | default([]))
             | rejectattr('device', 'in', scsi_exclude_paths | default([]))
             | rejectattr('serial', 'in', scsi_exclude_serials | default([]))

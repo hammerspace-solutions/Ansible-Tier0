@@ -135,10 +135,15 @@
 # Build image
 # ---------------------------------------------------------------------------
 
-- name: "Build container image with {{ di_container_runtime }}"
+- name: Set container platform for build
+  ansible.builtin.set_fact:
+    _di_container_platform: "{{ 'linux/arm64' if ansible_architecture == 'aarch64' else 'linux/amd64' }}"
+
+- name: "Build container image with {{ di_container_runtime }} ({{ _di_container_platform }})"
   ansible.builtin.command:
     cmd: >-
       {{ di_container_runtime }} build
+      --platform {{ _di_container_platform }}
       --build-arg BASE_IMAGE={{ di_container_base_image }}
       -t {{ di_container_image }}
       -f {{ di_container_build_dir }}/Containerfile

@@ -1,45 +1,116 @@
 ---
-# Shared boot device detection — identifies the disk containing the root filesystem
-# Handles: direct partitions, LVM/device-mapper, NVMe partition suffixes
-# Output: _detected_boot_device (string, e.g. "nvme2n1" or "sda")
+# Detect ALL disks that host any active filesystem, mounted partition, swap,
+# md member, or LVM PV. Returns a LIST of disk names (not just one) so we
+# defend against:
+#   - Multi-disk boot setups (separate /boot, /, /home)
+#   - LVM/md spanning multiple disks
+#   - Active swap on a non-root disk
+#   - Hot-spares or leftover PVs from prior deployments
+#
+# Output facts:
+#   _detected_boot_device  — string, primary boot disk (back-compat with old code)
+#   _protected_disks       — list of all disk names that MUST NOT be touched
+#
+# Hard-fails if detection produces an empty list (instead of silently allowing
+# mkfs on the boot drive — earlier prod incident: bare-metal Korean-locale host
+# had detection silently return "" and the playbook proceeded to mkfs the
+# boot NVMe; only saved by kernel reporting EBUSY).
 
-- name: Identify boot device (device containing root filesystem)
-  ansible.builtin.shell: |
-    # Find the root filesystem source device
-    root_source=$(findmnt -n -o SOURCE / 2>/dev/null)
+- name: Detect all protected disks (boot, root, mounted, swap, md, LVM)
+  ansible.builtin.shell:
+    cmd: |
+      set -uo pipefail
+      export LC_ALL=C LANG=C
 
-    # Trace through LVM/device-mapper to the physical disk
-    if echo "$root_source" | grep -q "mapper\|dm-"; then
-      # LVM: get the physical volume, then trace to the base disk
-      pv_device=$(pvs --noheadings -o pv_name 2>/dev/null | head -1 | xargs)
-      if [ -n "$pv_device" ]; then
-        # Strip partition number to get base disk (nvme2n1p3 -> nvme2n1, sda3 -> sda)
-        base_disk=$(lsblk -no PKNAME "$pv_device" 2>/dev/null | head -1)
-        if [ -z "$base_disk" ]; then
-          # Fallback: strip partition suffix directly
-          base_disk=$(echo "$pv_device" | sed 's|/dev/||' | sed 's/p\?[0-9]*$//')
-        fi
-        echo "$base_disk"
-      else
-        lsblk -no PKNAME "$root_source" 2>/dev/null | head -1
-      fi
-    else
-      # Direct partition or disk
-      parent=$(lsblk -no PKNAME "$root_source" 2>/dev/null | head -1)
-      if [ -n "$parent" ]; then
-        echo "$parent"
-      else
-        echo "$root_source" | sed 's|/dev/||' | sed 's/p\?[0-9]*$//'
-      fi
-    fi
-  register: _boot_device_detection_raw
+      resolve_to_disk() {
+          local src="$1"
+          [ -z "$src" ] && return
+          [ -b "$src" ] || return
+
+          # lsblk -s walks INVERSE dependencies (this device built on what?).
+          # Continue up until we reach TYPE=disk, which is the physical disk.
+          lsblk -nrpso NAME,TYPE "$src" 2>/dev/null | \
+              awk '$2 == "disk" {print $1}' | \
+              while read -r disk; do
+                  basename "$disk"
+              done
+      }
+
+      {
+          # 1. Mounted filesystems
+          awk '/^\/dev\// {print $1}' /proc/mounts | while read -r dev; do
+              resolve_to_disk "$dev"
+          done
+
+          # 2. Active swap
+          awk 'NR>1 && $1 ~ /^\/dev\// {print $1}' /proc/swaps | while read -r dev; do
+              resolve_to_disk "$dev"
+          done
+
+          # 3. Active md array members
+          if [ -r /proc/mdstat ]; then
+              grep -oE '[a-z]+[0-9]+(n[0-9]+)?(p[0-9]+)?\[[0-9]+\]' /proc/mdstat 2>/dev/null | \
+                  sed 's/\[[0-9]*\]$//' | \
+                  while read -r member; do
+                      resolve_to_disk "/dev/$member"
+                  done
+          fi
+
+          # 4. LVM PVs (catches PVs from leftover/orphan VGs)
+          pvs --noheadings -o pv_name 2>/dev/null | while read -r pv; do
+              resolve_to_disk "$(echo "$pv" | xargs)"
+          done
+      } | sort -u | grep -v '^$' || true
+  register: _protected_disks_raw
   changed_when: false
 
-- name: Set detected boot device fact
+- name: Set _protected_disks fact
   ansible.builtin.set_fact:
-    _detected_boot_device: "{{ _boot_device_detection_raw.stdout | default('') | trim }}"
+    _protected_disks: "{{ _protected_disks_raw.stdout_lines | default([]) | reject('equalto', '') | list }}"
 
-- name: Warn if boot device detection returned empty
+- name: Identify the disk hosting / (root filesystem)
+  ansible.builtin.shell:
+    cmd: |
+      set -uo pipefail
+      export LC_ALL=C LANG=C
+      root_src=$(findmnt -n -o SOURCE / 2>/dev/null || true)
+      [ -z "$root_src" ] && exit 0
+      lsblk -nrpso NAME,TYPE "$root_src" 2>/dev/null | \
+          awk '$2 == "disk" {print $1; exit}' | xargs -n1 basename 2>/dev/null || true
+  register: _root_disk_raw
+  changed_when: false
+
+- name: Set _detected_boot_device fact (back-compat with downstream filters)
+  ansible.builtin.set_fact:
+    _detected_boot_device: >-
+      {{ (_root_disk_raw.stdout | default('') | trim)
+         if (_root_disk_raw.stdout | default('') | trim) | length > 0
+         else (_protected_disks[0] | default('')) }}
+
+- name: Display protected disks
   ansible.builtin.debug:
-    msg: "WARNING: Boot device detection returned empty. All drives may be included in RAID — verify manually."
-  when: _detected_boot_device | length == 0
+    msg: |
+      Protected disks (boot / root / mounted / swap / md / LVM — will NEVER be touched):
+      {% for d in _protected_disks %}
+        - /dev/{{ d }}
+      {% else %}
+        (none — detection returned empty)
+      {% endfor %}
+      Primary boot disk: {{ _detected_boot_device | default('UNKNOWN') }}
+
+- name: FAIL if no protected disks were detected (refusing to risk the boot drive)
+  ansible.builtin.fail:
+    msg: |
+      Boot / protected-disk detection returned an EMPTY list.
+      Refusing to proceed — running RAID / mkfs without an exclusion list
+      could wipe the OS disk.
+
+      Debug:
+        /proc/mounts entries: {{ ansible_mounts | default([]) | length }}
+        findmnt root: '{{ _root_disk_raw.stdout | default('') | trim }}'
+
+      If you are intentionally provisioning a diskless / netboot system,
+      set allow_empty_protected_disks: true in vars/main.yml (NOT recommended).
+  when:
+    - _protected_disks | length == 0
+    - not (allow_empty_protected_disks | default(false) | bool)

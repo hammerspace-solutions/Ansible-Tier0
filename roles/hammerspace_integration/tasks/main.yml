@@ -140,6 +140,15 @@
   when: hammerspace_enable_az_mapping | default(false)
 
 # =============================================================================
+# GPU Fabric AZ Detection (Optional - auto-detect AZ from GPU memory fabric)
+# =============================================================================
+
+- name: Detect AZ from GPU memory fabric
+  ansible.builtin.include_tasks: gpu_fabric_az.yml
+  when: hammerspace_gpu_fabric_az | default(false)
+  tags: [hammerspace, gpu-fabric-az]
+
+# =============================================================================
 # Node Registration
 # =============================================================================
 

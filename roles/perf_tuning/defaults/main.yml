@@ -1,0 +1,49 @@
+---
+# Defaults for perf_tuning role. Override in vars/main.yml.
+
+# Master toggle. Set to false to skip all perf tuning.
+perf_tuning_enabled: true
+
+# ---- sunrpc / NFS client RPC slot tables (Hammerspace BKM) ----
+# Increases the per-mount RPC slot count to keep many in-flight NFS ops.
+# Defaults: kernel ships with 2/65536 — Hammerspace recommends 128/65536.
+perf_sunrpc_tunables_enabled: true
+perf_sunrpc_tcp_slot_table_entries: 128
+perf_sunrpc_tcp_max_slot_table_entries: 65536
+
+# ---- NFSD threading + direct I/O (server-side BKM) ----
+# nfs_threads is already defined in vars/main.yml (default 128).
+# This section tunes additional NFSD parameters that aren't covered there.
+perf_nfsd_tunables_enabled: true
+# Max block size negotiated on the wire (kernel max is 1048576 = 1MB).
+perf_nfsd_max_block_size: 1048576
+# Enable nfsd direct I/O (bypasses page cache for large sequential reads).
+# Reduces double-buffering at the cost of higher latency for small reads.
+perf_nfsd_direct_io: true
+
+# ---- Read-ahead (Hammerspace BKM: 1024-16384 KB for sequential workloads) ----
+# nfs_setup already deploys a 1024 KB udev rule for NFS mounts. This section
+# is for the *block devices* backing /hammerspace/hsvol* (NVMe / MD arrays).
+perf_readahead_enabled: true
+perf_readahead_kb: 4096
+
+# ---- NIC IRQ pinning (NUMA-local interrupt steering) ----
+# Pins NIC RX/TX queue IRQs to CPUs on the same NUMA node as the NIC.
+# Big win for high-throughput RDMA/TCP workloads on multi-socket nodes.
+perf_irq_pinning_enabled: true
+# Network interfaces to pin. Empty list = auto-detect 25Gbps+ NICs.
+perf_irq_pin_interfaces: []
+#   - ens1f0
+#   - ens1f1
+# Disable irqbalance service (it fights manual pinning)
+perf_irq_pinning_stop_irqbalance: true
+
+# ---- TCP / network sysctl BKMs ----
+perf_tcp_sysctl_enabled: true
+perf_tcp_sysctl:
+  net.core.rmem_max: 268435456
+  net.core.wmem_max: 268435456
+  net.ipv4.tcp_rmem: "4096 87380 268435456"
+  net.ipv4.tcp_wmem: "4096 65536 268435456"
+  net.core.netdev_max_backlog: 250000
+  net.ipv4.tcp_mtu_probing: 1

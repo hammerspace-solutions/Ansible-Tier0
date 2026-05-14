@@ -134,22 +134,31 @@
 - name: Combine all in-use devices
   ansible.builtin.set_fact:
     drives_in_use: >-
-      {{ (mounted_nvme_raw.stdout_lines | default([]))
-       + (mdadm_nvme_raw.stdout_lines | default([]))
-       + (lvm_nvme_raw.stdout_lines | default([]))
-       + (mounted_scsi_raw.stdout_lines | default([]))
-       + (mdadm_scsi_raw.stdout_lines | default([]))
-       + (lvm_scsi_raw.stdout_lines | default([]))
-       | unique }}
+      {{ ((mounted_nvme_raw.stdout_lines | default([]))
+        + (mdadm_nvme_raw.stdout_lines | default([]))
+        + (lvm_nvme_raw.stdout_lines | default([]))
+        + (mounted_scsi_raw.stdout_lines | default([]))
+        + (mdadm_scsi_raw.stdout_lines | default([]))
+        + (lvm_scsi_raw.stdout_lines | default([])))
+        | unique | list }}
 
 - name: Set boot device for comparison
   ansible.builtin.set_fact:
     boot_nvme_device: "/dev/{{ boot_device_check.stdout | trim }}n1"
   when: boot_device_check.stdout | default('') | trim is match('^nvme')
 
-- name: Filter out boot device from in-use list
+- name: Build regex pattern that matches any protected disk
   ansible.builtin.set_fact:
-    drives_in_use_non_boot: "{{ drives_in_use | reject('search', boot_device_check.stdout | trim) | list }}"
+    _protected_regex: >-
+      {{ '(' + (_protected_disks | default([_detected_boot_device | default('')])
+                | reject('equalto', '') | list | join('|')) + ')' }}
+
+- name: Filter out ALL protected disks from in-use list (not just boot)
+  ansible.builtin.set_fact:
+    drives_in_use_non_boot: >-
+      {{ drives_in_use | reject('search', _protected_regex) | list
+         if (_protected_disks | default([]) | length > 0)
+         else (drives_in_use | reject('search', boot_device_check.stdout | trim) | list) }}
 
 - name: Display devices currently in use
   ansible.builtin.debug:
