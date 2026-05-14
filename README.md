@@ -22,6 +22,10 @@ Tier 0 transforms existing local NVMe storage on GPU servers into ultra-fast, pe
 - **Firewall Setup**: Opens required ports for NFS, including RDMA port 20049
 - **iptables Flush**: Automatically flushes iptables rules at playbook start to prevent connectivity issues
 - **Mount Point Protection**: systemd guard services and auto-remount watchdog to prevent accidental unmounts
+- **Boot-Drive Safety**: detection enumerates *every* disk hosting a mounted FS, swap, md member, or LVM PV — not just `/`. Empty detection hard-fails the playbook (override via `allow_empty_protected_disks: true` for diskless systems). A final assertion before any `mkfs` rejects candidate devices that overlap the protected-disk list. Regression test: `tests/integration/test_boot_device_safety.yml`.
+- **Performance BKMs (`perf_tuning` role)**: sunrpc TCP slot tables (128/65536), NFSD direct I/O + 1MB max_block_size, 4MB block-device read-ahead, NIC IRQ pinning to NUMA-local CPUs, high-throughput TCP sysctl. Each section independently toggleable.
+- **API Preflight**: Tests Hammerspace API reachability and credentials at playbook start — fails in <30 s on bad password or unreachable Anvil instead of hours into RAID/FS setup.
+- **Single-source Anvil IP**: Set `hammerspace_api_host` once; `hammerspace_nodes`, `network_test_targets`, and `hammerspace_cluster_mgmt_ip` derive from it.
 
 ### Hammerspace Integration
 - **Node Registration**: Automatically registers storage servers via Anvil REST API
@@ -75,7 +79,24 @@ ansible-storage-setup/
 ├── inventory.oci.yml        # OCI dynamic inventory (auto-discovery)
 ├── inventory.aws.yml        # AWS EC2 dynamic inventory (auto-discovery)
 ├── inventory.gcp.yml        # GCP Compute Engine dynamic inventory (auto-discovery)
-├── site.yml                 # Main playbook (Tier0 + optional DI)
+├── site.yml                 # Top-level playbook (imports plays/*.yml — Tier0 + optional DI)
+├── plays/                   # Individual plays composed by site.yml
+│   ├── storage.yml          # RAID, filesystem, NFS, perf, HS integration (storage_servers)
+│   ├── hammerspace_serial.yml  # Serialized HS integration (when hammerspace_serial > 0)
+│   ├── di_exports.yml       # Auto-wire DI IPs into Tier 0 NFS exports
+│   └── di.yml               # Deploy pd-di on di_nodes
+├── scripts/
+│   └── run.sh               # Wrapper that forces en_US.UTF-8 locale (use on non-English hosts)
+├── tests/
+│   └── integration/
+│       ├── test_boot_device_safety.yml  # Regression test for the boot-drive mkfs bug
+│       └── README.md                    # How to run the integration tests
+├── oci_deploy.py            # OCI Run Command orchestrator (zero-SSH deployment)
+├── oci-function/            # OCI Events + Functions for auto-provisioning
+│   ├── func.py              # Function handler (event-triggered)
+│   ├── Dockerfile           # Function container image
+│   ├── build.sh             # Build + push to OCIR
+│   └── terraform/           # Infrastructure (Event Rule, Function, IAM)
 ├── build_di_image.yml       # Build DI container images and export as tar
 ├── reset-tier0-host.yml     # Full host reset (Hammerspace + NFS + RAID + drives)
 ├── decommission_di.yml      # DI node decommission playbook
@@ -101,6 +122,8 @@ ansible-storage-setup/
     ├── raid_setup/              # RAID configuration with mdadm.conf persistence
     ├── filesystem_setup/        # Filesystem creation with UUID-based fstab
     ├── nfs_setup/               # NFS server configuration
+    ├── perf_tuning/             # Hammerspace BKMs (sunrpc slots, NFSD direct IO,
+    │                            #   readahead, NIC IRQ pinning, TCP sysctl)
     ├── firewall_setup/          # Firewall configuration (firewalld/ufw/iptables)
     ├── di/                      # Data Instantiator (DI / NFS Mover) - consolidated role
     │   ├── tasks/
@@ -155,9 +178,34 @@ brew install ansible
 # Linux/pip
 pip install ansible --break-system-packages
 
+# Clone the repo
+git clone https://github.com/hammerspace-solutions/Ansible-Tier0.git
+cd Ansible-Tier0
+
+# Pull large files (DI RPMs in payload/) — requires git-lfs
+git lfs pull
+
 # Install required collections
 ansible-galaxy collection install -r requirements.yml
 ```
+
+> **Note:** The `payload/` directory contains DI RPMs tracked by Git LFS.
+> After cloning, you must run `git lfs pull` to download the actual files.
+> Without this, the RPMs will be small pointer files and container builds will fail.
+> Install Git LFS: `brew install git-lfs` (macOS) or `apt install git-lfs` (Linux).
+
+> **Non-English locale (Korean / CJK / non-UTF-8 systems):** Ansible aborts with
+> `ERROR: Ansible could not initialize the preferred locale: unsupported locale setting`
+> on hosts whose default locale isn't UTF-8. Either export a UTF-8 locale in your shell:
+> ```bash
+> export LANG=en_US.UTF-8
+> export LC_ALL=en_US.UTF-8
+> ```
+> or use the wrapper script, which sets the locale for you:
+> ```bash
+> ./scripts/run.sh playbook site.yml -i inventory.yml
+> ./scripts/run.sh inventory -i inventory.yml --list
+> ```
 
 ### 2. Configure Inventory
 
@@ -2214,6 +2262,111 @@ di_decommission_evacuate_data: true
 di_decommission_stop_services: true
 ```
 
+## Zero-SSH Deployment (OCI Run Command)
+
+For dynamic OCI environments where SSH key management is not desired, `oci_deploy.py` uses OCI Run Command to deploy Tier 0 and DI without any SSH access. The Oracle Cloud Agent on each instance executes the bootstrap script via the OCI control plane.
+
+```
+Operator                    OCI Control Plane           GPU Instance
+oci_deploy.py ── OCI API ──► Run Command Service ──► Cloud Agent → bootstrap.sh → ansible (local)
+```
+
+### Quick Start
+
+```bash
+# Install OCI SDK
+pip3 install oci
+
+# Discover instances (dry run)
+python3 oci_deploy.py --compartment-id <OCID> --shape "BM.GPU.GB200-v3.4" --dry-run
+
+# Deploy with OCI Vault for credentials (recommended)
+python3 oci_deploy.py --compartment-id <OCID> --vault-secret-id <SECRET_OCID> --yes
+
+# Deploy to specific instances
+python3 oci_deploy.py --compartment-id <OCID> --instance-id <OCID1> --instance-id <OCID2>
+
+# Skip already-registered instances
+python3 oci_deploy.py --compartment-id <OCID> \
+  --hs-host 10.0.10.15 --hs-password-file ~/.hs_password \
+  --skip-registered --yes
+
+# Deploy only DI (skip Tier 0)
+python3 oci_deploy.py --compartment-id <OCID> --mode di --yes
+```
+
+### Credentials Security
+
+| Method | Setting | Security Level |
+|--------|---------|----------------|
+| OCI Vault (recommended) | `--vault-secret-id <OCID>` | Password never in Run Command payload |
+| Password file | `--hs-password-file ~/.hs_password` | Injected as env var (encrypted in transit) |
+| Environment | `HAMMERSPACE_PASSWORD` env var | Same as password file |
+
+**OCI Vault setup (one-time):**
+```bash
+# Store password in OCI Vault
+oci vault secret create-base64 --compartment-id <OCID> \
+  --vault-id <VAULT_OCID> --key-id <KEY_OCID> \
+  --secret-name "hammerspace-api-password" \
+  --secret-content-content "$(echo -n 'YourPassword' | base64)"
+
+# IAM policy to allow instances to read the secret
+# Allow dynamic-group gpu-instances to read secret-bundles in compartment X
+```
+
+### How It Works
+
+1. `oci_deploy.py` discovers GPU instances in the compartment (OCI SDK)
+2. Checks Oracle Cloud Agent "Run Command" plugin is active on each instance
+3. Optionally checks Hammerspace to skip already-registered instances
+4. Sends the bootstrap script to each instance via OCI Run Command API
+5. Each instance: installs Ansible → clones repo → runs `site.yml` locally
+6. Polls for completion and reports results
+
+No SSH, no keys, no bastion, no network access to instances required.
+
+### Event-Driven Auto-Provisioning (OCI Events + Functions)
+
+For fully automated environments: when a GPU instance reaches RUNNING, an OCI Event triggers a Function that sends the Run Command automatically. Zero human intervention.
+
+```
+Instance launches → OCI Event → OCI Function → Run Command → instance self-provisions
+```
+
+**Setup:**
+
+```bash
+# 1. Build and push the function image to OCIR
+cd oci-function
+./build.sh us-sanjose-1 mytenancy tier0-functions
+
+# 2. Deploy infrastructure (Event Rule + Function + IAM)
+cd terraform
+cp terraform.tfvars.example terraform.tfvars
+# Edit terraform.tfvars with your values
+terraform init && terraform apply
+```
+
+**What happens automatically:**
+1. New GPU instance reaches RUNNING state
+2. OCI Events fires `com.oraclecloud.computeapi.launchinstance.end`
+3. Event rule invokes the function
+4. Function validates shape, waits for Cloud Agent, sends Run Command
+5. Instance self-provisions via bootstrap script (fire-and-forget)
+6. Only fires on initial launch (not reboot or stop/start)
+
+**Configuration** is set via Function Application environment variables in Terraform (`main.tf`):
+
+| Variable | Description |
+|----------|-------------|
+| `COMPARTMENT_ID` | OCI compartment |
+| `VAULT_SECRET_ID` | OCI Vault secret with Hammerspace password |
+| `SHAPE_FILTER` | Comma-separated shapes (e.g., `BM.GPU.GB200-v3.4`) |
+| `DEPLOY_MODE` | `tier0` / `di` / `both` |
+| `HS_HOST` | Hammerspace Anvil IP |
+| `REPO_URL` / `REPO_BRANCH` | Ansible repo |
+
 ## Decommission & Reset Tools
 
 Three tools for different teardown scenarios:
@@ -2271,6 +2424,27 @@ ansible-playbook reset-tier0-host.yml -i inventory.yml \
 ## Customer Deployment Guide
 
 For step-by-step deployment instructions, see **[DEPLOYMENT_GUIDE.md](DEPLOYMENT_GUIDE.md)**.
+
+## Testing
+
+Self-contained Ansible integration tests live under `tests/integration/`.
+They run against `localhost` with `connection: local`, no remote hosts
+required, no sudo prompt — safe to run on a dev laptop or in CI.
+
+```bash
+# Boot-drive safety regression suite (6 test cases)
+./scripts/run.sh playbook tests/integration/test_boot_device_safety.yml -i localhost, -c local
+```
+
+Linux-only — the playbook self-skips on macOS. See
+[`tests/integration/README.md`](tests/integration/README.md) for the test
+matrix and when to run.
+
+Run the suite before merging any change to:
+- `roles/nvme_discovery/tasks/detect_boot_device.yml`
+- `roles/nvme_discovery/tasks/main.yml` (`rejectattr` filters)
+- `roles/nvme_discovery/tasks/build_raid_arrays.yml` (safety gate)
+- `roles/precheck/tasks/validate_drives.yml`
 
 ## References
 

@@ -1,0 +1,117 @@
+---
+# Data Instantiator (DI / NFS Mover) Deployment.
+# Imported by site.yml.
+#
+# Optional: deploy Hammerspace DI on dedicated mover nodes.
+# Enable with deploy_di: true in vars/main.yml or -e deploy_di=true
+#
+# DI nodes are separate from storage_servers — define them in the di_nodes
+# inventory group. They can overlap with storage_servers if DI runs on the
+# same hosts.
+#
+# Two deployment modes:
+#   di_deployment_type: "host"      - Install pd-di RPM directly on the OS
+#   di_deployment_type: "container" - Build & run pd-di in a container (podman/docker)
+#
+# Usage:
+#   ansible-playbook site.yml -i inventory.yml -e deploy_di=true
+#   ansible-playbook site.yml -i inventory.yml --tags di
+#   ansible-playbook site.yml -i inventory.yml --tags di --limit "mover101"
+
+- name: Deploy Hammerspace Data Instantiator (DI)
+  hosts: di_nodes
+  become: true
+  gather_facts: true
+
+  vars_files:
+    - ../vars/main.yml
+
+  pre_tasks:
+    - name: Load vault variables (if available)
+      ansible.builtin.include_vars:
+        file: "{{ playbook_dir }}/vars/vault.yml"
+      when: lookup('file', playbook_dir ~ '/vars/vault.yml', errors='ignore') | default('', true) | length > 0
+      failed_when: false
+      no_log: true
+
+    - name: Skip DI deployment if not enabled
+      ansible.builtin.meta: end_play
+      when: not (deploy_di | default(false) | bool)
+
+    - name: Verify required DI variables are defined
+      ansible.builtin.assert:
+        that:
+          - hammerspace_cluster_mgmt_ip is defined
+          - hammerspace_api_user is defined
+          - hammerspace_api_password is defined
+        fail_msg: "Required Hammerspace cluster variables are not defined. Check vars/main.yml"
+
+    - name: Validate di_deployment_type
+      ansible.builtin.assert:
+        that:
+          - di_deployment_type in ['host', 'container']
+        fail_msg: "di_deployment_type must be 'host' or 'container' (got: '{{ di_deployment_type }}')"
+
+    - name: Display selected DI deployment mode
+      ansible.builtin.debug:
+        msg: >-
+          DI deployment mode: {{ di_deployment_type }}{% if di_deployment_type == 'container' %}
+          ({{ di_container_runtime }}, image={{ di_container_image }},
+          base={{ di_container_base_image }}){% endif %}
+
+    - name: Check if DI node already exists in Hammerspace
+      ansible.builtin.shell:
+        cmd: >-
+          curl -s -o /dev/stdout -w "\n%{http_code}" --max-time 30
+          {{ '' if (hammerspace_api_validate_certs | default(false)) else '-k' }}
+          -u "{{ hammerspace_api_user }}:{{ hammerspace_api_password }}"
+          "https://{{ hammerspace_api_host }}:{{ hammerspace_api_port | default(8443) }}/mgmt/v1.2/rest/nodes/{{ di_node_name | default(inventory_hostname) | urlencode }}"
+      register: hs_di_precheck_raw
+      changed_when: false
+      failed_when: false
+      check_mode: false
+
+    - name: Set DI node_already_registered fact
+      ansible.builtin.set_fact:
+        node_already_registered: "{{ ((hs_di_precheck_raw.stdout_lines | default(['404']))[-1] | int) == 200 }}"
+
+    - name: Display DI node registration status
+      ansible.builtin.debug:
+        msg: >-
+          DI node '{{ di_node_name | default(inventory_hostname) }}'
+          {{ 'is already registered in Hammerspace' if node_already_registered | bool
+          else 'is not yet registered in Hammerspace' }}
+
+  roles:
+    - role: di
+      tags: [di]
+
+  post_tasks:
+    - name: DI deployment complete (host mode)
+      ansible.builtin.debug:
+        msg: |
+          ============================================
+          DI DEPLOYMENT COMPLETE
+          ============================================
+          Node: {{ di_node_name | default(inventory_hostname) }}
+          Mode: host (native RPM)
+          Verify: ssh {{ inventory_hostname }} "systemctl status pd-di"
+          Cluster: anvil> node-list --name {{ di_node_name | default(inventory_hostname) }}
+          ============================================
+      when: di_deployment_type == 'host'
+
+    - name: DI deployment complete (container mode)
+      ansible.builtin.debug:
+        msg: |
+          ============================================
+          DI DEPLOYMENT COMPLETE
+          ============================================
+          Node: {{ di_node_name | default(inventory_hostname) }}
+          Mode: container ({{ di_container_runtime }})
+          Container: {{ di_container_name }}
+          Image: {{ di_container_image }}
+          Verify: ssh {{ inventory_hostname }} "{{ di_container_runtime }} exec {{ di_container_name }} systemctl status pd-di"
+          Logs:   ssh {{ inventory_hostname }} "{{ di_container_runtime }} logs {{ di_container_name }}"
+          Cluster: anvil> node-list --name {{ di_node_name | default(inventory_hostname) }}
+          ============================================
+      when: di_deployment_type == 'container'

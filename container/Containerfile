@@ -26,10 +26,18 @@ RUN dnf -y install epel-release && \
 RUN dnf -y install dnf-plugins-core && \
     dnf config-manager --set-enabled crb || true
 
-# Payload: pd-di + runtime-dep RPMs + add_node.py, staged by the role.
+# Install DI runtime dependencies from repos (so payload only needs pd-di + libtirpc).
+# babeltrace is in the 'devel' repo on Rocky 9.
+RUN dnf -y install lttng-tools lttng-ust jemalloc && \
+    dnf --enablerepo=devel -y install babeltrace || true && \
+    dnf clean all
+
+# Payload: pd-di + optional runtime-dep RPMs + add_node.py, staged by the role.
 COPY payload/ /opt/payload/
 
-# Install only RPMs matching the container architecture (+ noarch)
+# Install RPMs from payload matching the container architecture (+ noarch).
+# Dependencies already installed from repos above; payload provides pd-di
+# and any Hammerspace-patched packages (e.g., libtirpc).
 RUN ARCH=$(uname -m) && \
     RPM_FILES=$(ls /opt/payload/*.${ARCH}.rpm /opt/payload/*.noarch.rpm 2>/dev/null) && \
     if [ -n "$RPM_FILES" ]; then dnf -y install $RPM_FILES && dnf clean all; \

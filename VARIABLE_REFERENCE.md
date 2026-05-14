@@ -213,7 +213,7 @@ Used when `use_dynamic_discovery: false`.
 | `nfs_vers4_2` | `"y"` | Enable NFSv4.2. |
 | `nfs_rdma_enabled` | `"y"` | Enable NFS over RDMA. |
 | `nfs_rdma_port` | `20049` | RDMA port. |
-| `hammerspace_nodes` | `["10.0.10.15"]` | Anvil/DSX IPs requiring `no_root_squash`. |
+| `hammerspace_nodes` | `["{{ hammerspace_api_host }}"]` | Anvil/DSX IPs requiring `no_root_squash`. Defaults to the primary Anvil (no duplication); add secondary Anvils/DSX IPs here. |
 | `mover_nodes` | `["10.0.12.242"]` | Mover/DI node IPs requiring `no_root_squash`. |
 | `client_subnets` | `["0.0.0.0/0"]` | Client subnets with `root_squash`. |
 | `hammerspace_export_opts` | `"rw,no_root_squash,sync,secure,mp,no_subtree_check"` | Export options for Hammerspace nodes. |
@@ -250,6 +250,30 @@ Used when `use_dynamic_discovery: false`.
 | `hammerspace_remount_watchdog_interval` | `"1min"` | Watchdog check interval. |
 | `hammerspace_automount_timeout` | `10` | systemd automount timeout for device availability. |
 
+## Performance Tuning (`perf_tuning` role)
+
+Hammerspace Tier 0 performance BKMs applied on `storage_servers` after `nfs_setup`.
+Each section can be toggled independently. Role defaults live in `roles/perf_tuning/defaults/main.yml`.
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `perf_tuning_enabled` | `true` | Master toggle. Set `false` to skip the entire role. |
+| `perf_sunrpc_tunables_enabled` | `true` | Tune sunrpc TCP slot tables (sysctl + modprobe.d). |
+| `perf_sunrpc_tcp_slot_table_entries` | `128` | RPC slots per TCP connection (kernel default is 2). |
+| `perf_sunrpc_tcp_max_slot_table_entries` | `65536` | Upper bound on slot growth. |
+| `perf_nfsd_tunables_enabled` | `true` | NFSD server-side tuning. |
+| `perf_nfsd_max_block_size` | `1048576` | NFSD max negotiated block size (bytes). 1MB is the kernel max. |
+| `perf_nfsd_direct_io` | `true` | Enable nfsd direct I/O (bypasses page cache). Kernel-version dependent; warning emitted if unsupported. |
+| `perf_readahead_enabled` | `true` | Apply read-ahead to NVMe/MD/SCSI block devices behind `/hammerspace/hsvol*`. |
+| `perf_readahead_kb` | `4096` | Read-ahead in KB. Hammerspace recommends 1024-16384 for sequential workloads. |
+| `perf_irq_pinning_enabled` | `true` | Pin NIC RX/TX queue IRQs to NUMA-local CPUs (oneshot systemd unit). |
+| `perf_irq_pin_interfaces` | `[]` | Interfaces to pin. Empty = auto-detect 25Gbps+ NICs (`/sys/class/net/*/speed >= 25000`). |
+| `perf_irq_pinning_stop_irqbalance` | `true` | Stop and disable `irqbalance` (it fights manual pinning). |
+| `perf_tcp_sysctl_enabled` | `true` | Apply high-throughput TCP sysctl tunables (`rmem/wmem_max=256MB`, `tcp_mtu_probing=1`, etc.). |
+| `perf_tcp_sysctl` | *(dict)* | Override individual sysctl values. See role defaults for the full map. |
+
+**Run just the perf section:** `ansible-playbook site.yml --tags perf`
+
 ## Safety Settings
 
 | Variable | Default | Description |
@@ -257,6 +281,7 @@ Used when `use_dynamic_discovery: false`.
 | `skip_confirmation` | `false` | Skip confirmation prompts. Use with caution. |
 | `force_raid_recreate` | `false` | Force RAID recreation. **DESTRUCTIVE**. |
 | `force_fs_recreate` | `false` | Force filesystem recreation. **DESTRUCTIVE**. |
+| `allow_empty_protected_disks` | `false` | **DANGEROUS.** Bypass the boot-drive safety gate. When `false` (default), the playbook hard-fails if it can't identify any disks hosting `/`, swap, mounted FS, md, or LVM — the last line of defense against `mkfs` on the OS disk. Set to `true` only on diskless / netboot systems with no OS disk to protect. |
 
 ## Pre-Setup Validation (Precheck)
 
@@ -273,7 +298,7 @@ Used when `use_dynamic_discovery: false`.
 | `expected_mtu` | `9000` | Expected MTU for jumbo frames. |
 | `mtu_ping_size` | `8972` | Ping payload size (MTU - 28 bytes ICMP overhead). |
 | `enforce_mtu_test` | `false` | Fail if jumbo frame tests fail. |
-| `network_test_targets` | `["10.0.2.222"]` | IPs for jumbo frame connectivity tests. |
+| `network_test_targets` | `["{{ hammerspace_api_host }}"]` | IPs for jumbo frame connectivity tests. Defaults to the primary Anvil. |
 | `fail_on_missing_packages` | `true` | Fail if required packages are missing. |
 
 ## iperf Bandwidth Testing

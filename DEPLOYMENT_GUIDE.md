@@ -33,6 +33,16 @@ Before starting, ensure you have:
 | SSH Access | SSH key configured for instance access |
 | Hammerspace Cluster | Anvil management IP and admin credentials |
 | Network | Instances can reach Hammerspace Anvil on port 8443 |
+| Locale (control host) | UTF-8 locale required. Non-English systems (e.g. Korean ko_KR) must `export LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8` before running Ansible, or use `./scripts/run.sh` which sets it automatically. |
+
+> **Single-source the Anvil IP.** Set `hammerspace_api_host` once in `vars/main.yml`.
+> `hammerspace_nodes`, `network_test_targets`, and `hammerspace_cluster_mgmt_ip`
+> default to references back to it — no need to repeat the IP in three places.
+
+> **API preflight runs first.** The playbook tests reachability + credentials at
+> the Hammerspace API in the first 30 seconds and fails fast with a specific
+> message (401, 403, TCP failure, etc.) if anything is wrong, before any
+> RAID/filesystem/NFS work.
 
 ---
 
@@ -69,6 +79,10 @@ pip3 install oci
 ```bash
 git clone <repository-url> ansible-tier0
 cd ansible-tier0
+
+# Pull large files (DI RPMs in payload/) — requires git-lfs
+# Install git-lfs: brew install git-lfs (macOS) or apt install git-lfs (Linux)
+git lfs pull
 ```
 
 ### 2.4 Install Ansible Collections
@@ -392,8 +406,16 @@ The playbook will execute these roles in order:
 | 3 | `raid_setup` | Create mdadm RAID arrays |
 | 4 | `filesystem_setup` | Create XFS filesystems |
 | 5 | `nfs_setup` | Configure NFS server and exports |
-| 6 | `firewall_setup` | Open NFS and RDMA ports |
-| 7 | `hammerspace_integration` | Register node and volumes via API |
+| 6 | `perf_tuning` | Apply Hammerspace BKMs (sunrpc slots, NFSD direct I/O, read-ahead, NIC IRQ pinning, TCP sysctl) |
+| 7 | `firewall_setup` | Open NFS and RDMA ports |
+| 8 | `hammerspace_integration` | Register node and volumes via API |
+
+> **Run only the perf section** to retune existing nodes:
+> ```bash
+> ansible-playbook site.yml -i inventory.oci.yml --tags perf
+> ```
+> Disable the role entirely with `perf_tuning_enabled: false`.
+> Toggle individual sections with `perf_sunrpc_tunables_enabled`, `perf_nfsd_tunables_enabled`, `perf_readahead_enabled`, `perf_irq_pinning_enabled`, `perf_tcp_sysctl_enabled`.
 
 ---
 
@@ -928,6 +950,54 @@ The decommission playbook:
 
 ## 12. Troubleshooting
 
+### Locale errors (non-English control hosts)
+
+**Problem:** `ERROR: Ansible could not initialize the preferred locale: unsupported locale setting`
+This occurs on hosts whose system locale isn't UTF-8 (Korean ko_KR, Japanese ja_JP, etc.).
+```bash
+# Solution A: export UTF-8 in the shell, then run ansible-playbook normally
+export LANG=en_US.UTF-8
+export LC_ALL=en_US.UTF-8
+ansible-playbook site.yml -i inventory.yml
+
+# Solution B: use the wrapper (sets the locale for you)
+./scripts/run.sh playbook site.yml -i inventory.yml
+./scripts/run.sh inventory -i inventory.yml --list
+```
+If `en_US.UTF-8` isn't installed, generate it with `locale-gen en_US.UTF-8` (Debian/Ubuntu) or `localectl set-locale LANG=en_US.UTF-8` (RHEL/Rocky).
+
+### Boot-drive safety gate failure
+
+**Symptom:** Playbook aborts at `nvme_discovery` with one of:
+
+1. `Boot / protected-disk detection returned an EMPTY list.`
+   The playbook could not identify which disks are protected (host `/`, swap, mounted FS, md, or LVM). It will not proceed because running `mkfs` without that exclusion list could wipe the OS disk.
+   - **First, investigate.** Run on the target host:
+     ```bash
+     findmnt -n -o SOURCE /
+     cat /proc/mounts
+     cat /proc/swaps
+     pvs --noheadings -o pv_name 2>/dev/null
+     ```
+     One of these must return something non-empty. If they all return empty, the host is in a state the playbook cannot reason about — fix the host first.
+   - **Only on a genuinely diskless / netboot system** (no OS disk at all): set `allow_empty_protected_disks: true` in `vars/main.yml`.
+
+2. `REFUSING TO PROCEED — candidate storage devices overlap with protected disks.`
+   Detection found a protected disk, but the device list about to be RAIDed includes it. The boot drive is being targeted. **Do NOT override this with `allow_empty_protected_disks`** — it indicates a real bug in detection or a misconfigured exclusion list. Open an issue with the displayed "Overlap:" line and the output of `lsblk -nrpso NAME,TYPE /dev/<overlap>`.
+
+Run the regression suite to confirm safety logic on the affected host:
+```bash
+./scripts/run.sh playbook tests/integration/test_boot_device_safety.yml -i localhost, -c local
+```
+
+### Hammerspace API preflight failure
+
+The playbook calls `/mgmt/v1.2/rest/cluster` at the start to validate connectivity + credentials. If it fails, you'll see one of:
+- **`HTTP response code: 401`** — bad `hammerspace_api_user` or `vault_hammerspace_api_password`. Verify the credentials in your vault file.
+- **`HTTP response code: 403`** — user authenticated but lacks the admin role.
+- **`HTTP response code: 0`** — TCP reached the host but TLS or HTTP didn't respond. Check the port (`hammerspace_api_port`, default 8443) and Anvil health.
+- **`wait_for` timeout** — `hammerspace_api_host` is unreachable from the control machine. Check routing/security lists.
+
 ### OCI Inventory Issues
 
 **Problem:** `The oci dynamic inventory plugin requires oci python sdk`
@@ -1245,6 +1315,8 @@ python3 cleanup_instance_nodes.py \
 | Decommission DI node | `ansible-playbook decommission_di.yml -i inventory.yml --limit "mover101"` |
 | Reset Tier 0 host | `ansible-playbook reset-tier0-host.yml -i inventory.yml --limit "node01" -e reset_confirm=true` |
 | Reset + blkdiscard | `ansible-playbook reset-tier0-host.yml -i inventory.yml --limit "node01" -e reset_confirm=true -e reset_run_blkdiscard=true` |
+| OCI Run Command deploy (dry run) | `python3 oci_deploy.py --compartment-id <OCID> --dry-run` |
+| OCI Run Command deploy | `python3 oci_deploy.py --compartment-id <OCID> --vault-secret-id <SECRET_OCID> --yes` |
 | Collect GPU fabric | `ansible-playbook collect_gpu_fabric.yml -i inventory.oci.yml` |
 | Assign AZ to volumes | `python3 assign_az_to_volumes.py --host <IP> --gpu-fabric-file gpu_fabric_data.txt` |
 | Assign AZ (explicit) | `python3 assign_az_to_volumes.py --host <IP> --gpu-fabric-file gpu_fabric_data.txt --az-map "FABRIC_OCID=AZ3"` |

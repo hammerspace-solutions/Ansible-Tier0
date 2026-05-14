@@ -582,10 +582,13 @@ nfs_rdma_enabled: "y"
 nfs_rdma_port: 20049
 
 # Hammerspace Anvil/DSX node IPs (require no_root_squash)
-# These are your Hammerspace management nodes
+# These are your Hammerspace management nodes.
+# By default the primary Anvil (hammerspace_api_host) is included automatically.
+# Add additional Anvil/DSX node IPs here if your cluster has more nodes.
 hammerspace_nodes:
-  - "10.0.10.15"  # Anvil cluster management IP
-  # Add additional Hammerspace node IPs as needed
+  - "{{ hammerspace_api_host }}"  # Primary Anvil (derived from hammerspace_api_host)
+  # - "10.0.10.16"   # Secondary Anvil node
+  # - "10.0.10.17"   # DSX node
 
 # Mover/DI node IPs - these need no_root_squash access
 # Include IPs for:
@@ -616,6 +619,47 @@ client_export_opts: "rw,root_squash,sync,secure,mp,no_subtree_check"
 #         options: "rw,sync,no_subtree_check,no_root_squash,secure,mp"
 #       - host: "10.200.104.0/24"
 #         options: "rw,sync,no_subtree_check,root_squash,secure,mp"
+
+# ============================================================================
+# Performance Tuning BKMs (Hammerspace Engineering)
+# ============================================================================
+# Hammerspace Tier 0 performance best practices not covered by nfs_setup.
+# Each section can be toggled independently; full role defaults live in
+# roles/perf_tuning/defaults/main.yml.
+
+# Master toggle for the perf_tuning role (false = skip everything below)
+perf_tuning_enabled: true
+
+# ---- sunrpc RPC slot tables ----
+# Default kernel value is 2; Hammerspace recommends 128 for high concurrency.
+perf_sunrpc_tunables_enabled: true
+perf_sunrpc_tcp_slot_table_entries: 128
+perf_sunrpc_tcp_max_slot_table_entries: 65536
+
+# ---- NFSD server-side ----
+# max_block_size negotiated with NFS clients (1MB is the kernel max)
+perf_nfsd_tunables_enabled: true
+perf_nfsd_max_block_size: 1048576
+# nfsd direct I/O bypasses the page cache for reads (kernel-version dependent)
+perf_nfsd_direct_io: true
+
+# ---- Block device read-ahead ----
+# Applied to NVMe drives + MD RAID arrays backing /hammerspace/hsvol*
+# (nfs_setup already configures NFS-client side via udev rule at 1024 KB)
+perf_readahead_enabled: true
+perf_readahead_kb: 4096
+
+# ---- NIC IRQ pinning (NUMA-local) ----
+# Pins NIC RX/TX queue IRQs to CPUs on the same NUMA node as the NIC.
+# Required for line-rate 100/200Gbps RDMA + TCP.
+perf_irq_pinning_enabled: true
+# Leave empty to auto-detect 25Gbps+ NICs; or specify explicitly:
+perf_irq_pin_interfaces: []
+#   - ens1f0
+#   - ens1f1
+
+# ---- TCP / network sysctl ----
+perf_tcp_sysctl_enabled: true
 
 # ============================================================================
 # Firewall Configuration
@@ -693,6 +737,13 @@ force_raid_recreate: false
 # Set to true to force filesystem recreation (DESTRUCTIVE!)
 force_fs_recreate: false
 
+# DANGEROUS: bypass the boot/protected-disk safety check.
+# Normally the playbook hard-fails if it cannot identify which disks host the
+# OS / root / swap / mounted FS / md / LVM. That detection is the last line of
+# defense against accidentally running mkfs on the boot drive. Only set to
+# true on diskless / netboot systems where there is no OS disk to protect.
+allow_empty_protected_disks: false
+
 # ============================================================================
 # Pre-Setup Validation Settings (Health Checks)
 # ============================================================================
@@ -744,9 +795,10 @@ enforce_mtu_test: false
 
 # --- Network Test Targets ---
 # IPs to test jumbo frame connectivity (should include all cluster nodes)
+# By default the primary Anvil (hammerspace_api_host) is tested automatically.
+# Add additional Tier 0/LSS/DSX IPs here for cross-node MTU validation.
 network_test_targets:
-  - "10.0.2.222"  # Anvil management IP
-  # Add other Tier 0/LSS nodes to test cross-node connectivity:
+  - "{{ hammerspace_api_host }}"  # Primary Anvil (derived from hammerspace_api_host)
   # - "10.200.100.101"  # tier0-node-01
   # - "10.200.100.102"  # tier0-node-02
 
