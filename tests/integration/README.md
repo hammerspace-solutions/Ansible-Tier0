@@ -5,6 +5,27 @@ without needing remote hosts. They run against `localhost` with
 `connection: local`, so they are safe to run on a developer laptop
 or in CI.
 
+## `test_raid_idempotency.yml`
+
+Regression test for the 2026-05-15 EBUSY-on-re-run incident (Peter's bug),
+where `mdadm --create /dev/md0 ... /dev/sdb /dev/sdc` failed because the
+kernel had already auto-assembled the array as `/dev/md127` after a reboot
+(initramfs/homehost mismatch). The role's name-only check
+(`'md0' not in existing_arrays`) missed it and tried to recreate over the
+already-busy members.
+
+Test cases:
+
+| # | Scenario | Expected behavior |
+|---|----------|-------------------|
+| 1 | Both planned arrays already assembled under different names (md0→md127, md1→md126) | `mdadm --create` skipped for both; `raid_arrays` + `mount_points` device fields remapped to actual `/dev/mdN` |
+| 2 | Fresh host, no md arrays exist | Both planned arrays survive the skip filter (no false-positive skips) |
+| 3 | Partial overlap — md0 exists as md127, md1 is fresh | Only md1 is created; md0 is skipped |
+
+The tests run the same Jinja expressions the role uses for `_array_md_lookup`,
+`_existing_md_for_array`, `_arrays_already_present`, and `_device_remap` —
+so a regression in the role logic shows up as a test-2 / test-3 failure.
+
 ## `test_boot_device_safety.yml`
 
 Regression test for the 2026-05-14 boot-drive incident, where empty
@@ -29,13 +50,15 @@ On macOS the playbook self-skips at the first task. Run on the Korean-locale
 host that hit the original bug (`dskbd079`), inside CI, or any Linux dev box.
 
 ```bash
-# Direct invocation
-ansible-playbook tests/integration/test_boot_device_safety.yml \
-    -i localhost, -c local
+# Boot-drive safety
+ansible-playbook tests/integration/test_boot_device_safety.yml -i localhost, -c local
+
+# RAID idempotency (re-run after reboot)
+ansible-playbook tests/integration/test_raid_idempotency.yml -i localhost, -c local
 
 # Through the locale wrapper (recommended on non-English systems)
-./scripts/run.sh playbook tests/integration/test_boot_device_safety.yml \
-    -i localhost, -c local
+./scripts/run.sh playbook tests/integration/test_boot_device_safety.yml -i localhost, -c local
+./scripts/run.sh playbook tests/integration/test_raid_idempotency.yml -i localhost, -c local
 ```
 
 Exit code is non-zero if any test fails. The final task prints a report:
@@ -60,6 +83,8 @@ FAILED: 0
 - Before merging any change to the safety gate in
   `roles/nvme_discovery/tasks/build_raid_arrays.yml`
 - After any change to `roles/precheck/tasks/validate_drives.yml`
+- After any change to `roles/raid_setup/tasks/main.yml` (idempotency
+  detection, `_device_remap`, or the per-element list rebuild pattern)
 
 Wire into pre-merge CI with whatever Ansible runtime is already
 installed in the pipeline.
