@@ -14,6 +14,7 @@ Tier 0 transforms existing local NVMe storage on GPU servers into ultra-fast, pe
 - **Comprehensive Health Checks**: Validates drive count, mount status, NUMA balance, 4K sector size, MTU connectivity, and package availability
 - **4K Sector Size Detection**: Identifies drives not using recommended 4096-byte sectors with optional formatting
 - **RAID Configuration**: Creates mdadm arrays with Hammerspace-recommended settings (power-of-2 sizes, NUMA-aware grouping)
+- **RAID Idempotency**: Detects when planned arrays already exist under a different kernel-auto-assigned name (e.g. `md127` instead of `md0` after a reboot) and remaps `mount_points` / `raid_arrays` to the actual device rather than failing on `Device or resource busy`. Regression test: `tests/integration/test_raid_idempotency.yml`.
 - **UUID-Based Mounts**: Uses filesystem UUIDs in `/etc/fstab` for reliable boot persistence
 - **mdadm Persistence**: Generates `/etc/mdadm.conf` with proper settings and updates initramfs
 - **Filesystem Setup**: Creates XFS filesystems with `agcount=512` per Hammerspace recommendations
@@ -90,6 +91,7 @@ ansible-storage-setup/
 ├── tests/
 │   └── integration/
 │       ├── test_boot_device_safety.yml  # Regression test for the boot-drive mkfs bug
+│       ├── test_raid_idempotency.yml    # Regression test for re-run after reboot (md127 case)
 │       └── README.md                    # How to run the integration tests
 ├── oci_deploy.py            # OCI Run Command orchestrator (zero-SSH deployment)
 ├── oci-function/            # OCI Events + Functions for auto-provisioning
@@ -2434,6 +2436,9 @@ required, no sudo prompt — safe to run on a dev laptop or in CI.
 ```bash
 # Boot-drive safety regression suite (6 test cases)
 ./scripts/run.sh playbook tests/integration/test_boot_device_safety.yml -i localhost, -c local
+
+# RAID idempotency regression suite (3 test cases — re-run after reboot scenarios)
+./scripts/run.sh playbook tests/integration/test_raid_idempotency.yml -i localhost, -c local
 ```
 
 Linux-only — the playbook self-skips on macOS. See
@@ -2445,6 +2450,7 @@ Run the suite before merging any change to:
 - `roles/nvme_discovery/tasks/main.yml` (`rejectattr` filters)
 - `roles/nvme_discovery/tasks/build_raid_arrays.yml` (safety gate)
 - `roles/precheck/tasks/validate_drives.yml`
+- `roles/raid_setup/tasks/main.yml` (idempotency detection + device remap)
 
 ## References
 

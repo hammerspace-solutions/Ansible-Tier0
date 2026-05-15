@@ -966,6 +966,36 @@ ansible-playbook site.yml -i inventory.yml
 ```
 If `en_US.UTF-8` isn't installed, generate it with `locale-gen en_US.UTF-8` (Debian/Ubuntu) or `localectl set-locale LANG=en_US.UTF-8` (RHEL/Rocky).
 
+### RAID create fails with `Device or resource busy` on re-run
+
+**Symptom:** First run succeeded and created the array (e.g. `/dev/md0`). After a reboot, re-running the playbook fails at `raid_setup`:
+```
+mdadm: super1.x cannot open /dev/sdb: Device or resource busy
+mdadm: cannot open /dev/sdb: Device or resource busy
+```
+`/proc/mdstat` shows the array is alive but under a different name (typically `/dev/md127`).
+
+**Cause:** mdadm.conf wasn't honored at boot (initramfs / homehost mismatch), so the kernel auto-assembled the array under the fallback `/dev/md127` name. The role's idempotency check used to compare *array name* only — `'md0' not in ['md127']` → tried to recreate over drives that are already in `md127`.
+
+**Fixed in `roles/raid_setup/tasks/main.yml`:** `lsblk` runs against each planned drive to find any md device it already belongs to. If found, `mdadm --create` is skipped and `raid_arrays[*].device` + `mount_points[*].device` are remapped to the actual `/dev/mdN`. Filesystem_setup then sees the existing XFS and skips `mkfs`, and the mount targets the real device.
+
+Just re-run the playbook on the affected hosts:
+```bash
+./scripts/run.sh playbook site.yml -i inventory.oci.yml --limit "inst-*"
+```
+You'll see lines like:
+```
+Planned array 'md0' is already assembled as /dev/md127 — skipping mdadm --create.
+Downstream mount_points will be remapped to use the actual device.
+```
+
+To verify the fix on a host you don't want to re-deploy yet, run the regression suite:
+```bash
+./scripts/run.sh playbook tests/integration/test_raid_idempotency.yml -i localhost, -c local
+```
+
+If you actually want to nuke the existing array and re-create with the original planned name (`md0`), set `force_raid_recreate: true` — but only after confirming no Hammerspace volumes have been written to the array.
+
 ### Boot-drive safety gate failure
 
 **Symptom:** Playbook aborts at `nvme_discovery` with one of:

@@ -279,7 +279,7 @@ Each section can be toggled independently. Role defaults live in `roles/perf_tun
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `skip_confirmation` | `false` | Skip confirmation prompts. Use with caution. |
-| `force_raid_recreate` | `false` | Force RAID recreation. **DESTRUCTIVE**. |
+| `force_raid_recreate` | `false` | Force RAID recreation. **DESTRUCTIVE**. Overrides both the same-name skip and the new device-membership skip (the latter detects an array assembled under a different kernel name e.g. `md127`, remaps mounts to it, and skips `mdadm --create`). Set `true` only when you actually want to nuke the existing array. |
 | `force_fs_recreate` | `false` | Force filesystem recreation. **DESTRUCTIVE**. |
 | `allow_empty_protected_disks` | `false` | **DANGEROUS.** Bypass the boot-drive safety gate. When `false` (default), the playbook hard-fails if it can't identify any disks hosting `/`, swap, mounted FS, md, or LVM — the last line of defense against `mkfs` on the OS disk. Set to `true` only on diskless / netboot systems with no OS disk to protect. |
 
