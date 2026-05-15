@@ -227,6 +227,7 @@
       block:
         - name: Re-run detection with ko_KR.UTF-8 forced (simulates Keith's host)
           ansible.builtin.shell:
+            executable: /bin/bash
             cmd: |
               set -uo pipefail
               export LC_ALL=C LANG=C

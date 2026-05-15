@@ -18,6 +18,8 @@
 
 - name: Detect all protected disks (boot, root, mounted, swap, md, LVM)
   ansible.builtin.shell:
+    # Force bash: dash (Ubuntu /bin/sh) does not support `set -o pipefail`.
+    executable: /bin/bash
     cmd: |
       set -uo pipefail
       export LC_ALL=C LANG=C
@@ -70,6 +72,7 @@
 
 - name: Identify the disk hosting / (root filesystem)
   ansible.builtin.shell:
+    executable: /bin/bash
     cmd: |
       set -uo pipefail
       export LC_ALL=C LANG=C

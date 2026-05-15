@@ -15,17 +15,20 @@
   failed_when: false
 
 - name: Auto-detect high-speed NICs when not specified
-  ansible.builtin.shell: |
-    set -eo pipefail
-    for iface in $(ls /sys/class/net/); do
-      [ "$iface" = "lo" ] && continue
-      [ -d "/sys/class/net/$iface/device" ] || continue
-      speed=$(cat /sys/class/net/$iface/speed 2>/dev/null || echo 0)
-      # 25Gbps or faster
-      if [ "$speed" -ge 25000 ] 2>/dev/null; then
-        echo "$iface"
-      fi
-    done
+  ansible.builtin.shell:
+    # Force bash: dash (Ubuntu /bin/sh) does not support `set -o pipefail`.
+    executable: /bin/bash
+    cmd: |
+      set -eo pipefail
+      for iface in $(ls /sys/class/net/); do
+        [ "$iface" = "lo" ] && continue
+        [ -d "/sys/class/net/$iface/device" ] || continue
+        speed=$(cat /sys/class/net/$iface/speed 2>/dev/null || echo 0)
+        # 25Gbps or faster
+        if [ "$speed" -ge 25000 ] 2>/dev/null; then
+          echo "$iface"
+        fi
+      done
   register: _perf_auto_nics
   changed_when: false
   failed_when: false
