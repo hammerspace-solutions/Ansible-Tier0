@@ -29,6 +29,118 @@
     msg: "Existing RAID arrays: {{ existing_arrays }}"
   when: existing_arrays | length > 0
 
+# ============================================================================
+# Idempotency: detect when planned drives are already in an md array under a
+# DIFFERENT name (e.g. kernel auto-assembled /dev/md127 after a reboot
+# because mdadm.conf wasn't in the initramfs). Without this, the create
+# step below fails with "Device or resource busy".
+# Outputs:
+#   _existing_md_for_array  — dict {planned_name -> actual /dev/mdN device}
+#   _arrays_already_present — list of planned names that already exist
+# ============================================================================
+
+- name: For each planned array, look up any md device its drives belong to
+  ansible.builtin.shell:
+    cmd: |
+      set -uo pipefail
+      export LC_ALL=C LANG=C
+      found=""
+      for d in {{ item.drives | join(' ') }}; do
+          [ -b "$d" ] || continue
+          # lsblk shows child raid* device when a drive is an md member
+          child=$(lsblk -nro NAME,TYPE "$d" 2>/dev/null \
+                   | awk '$2 ~ /^raid/ {print $1; exit}')
+          if [ -n "$child" ]; then
+              found="/dev/${child}"
+              break
+          fi
+      done
+      echo "${found}"
+  loop: "{{ raid_arrays }}"
+  loop_control:
+    label: "{{ item.name }}"
+  register: _array_md_lookup
+  changed_when: false
+
+- name: Build planned-name → existing-md-device mapping
+  ansible.builtin.set_fact:
+    _existing_md_for_array: >-
+      {{ dict(_array_md_lookup.results
+              | map(attribute='item')
+              | map(attribute='name')
+              | zip(_array_md_lookup.results
+                    | map(attribute='stdout')
+                    | map('trim')
+                    | list)) }}
+
+- name: List arrays whose drives are already assembled (under any name)
+  ansible.builtin.set_fact:
+    _arrays_already_present: >-
+      {{ _existing_md_for_array
+         | dict2items | selectattr('value', 'ne', '') | map(attribute='key') | list }}
+
+- name: Inform when planned array is already assembled under a different name
+  ansible.builtin.debug:
+    msg: |
+      Planned array '{{ item.key }}' is already assembled as {{ item.value }} —
+      skipping mdadm --create. Downstream mount_points will be remapped to use
+      the actual device.
+  loop: "{{ _existing_md_for_array | dict2items }}"
+  loop_control:
+    label: "{{ item.key }}"
+  when:
+    - item.value | length > 0
+    - item.value | basename != item.key       # name differs from planned
+
+# Remap raid_arrays[*].device and mount_points[*].device to the real /dev/mdN
+# so filesystem_setup / fstab / mount logic targets the array that ACTUALLY
+# exists, not the planned-but-unused /dev/md0.
+
+- name: Build planned-device → actual-device remap (e.g. /dev/md0 → /dev/md127)
+  ansible.builtin.set_fact:
+    _device_remap: >-
+      {{ dict(_array_md_lookup.results
+              | map(attribute='item')
+              | map(attribute='device')
+              | zip(_array_md_lookup.results
+                    | map(attribute='stdout')
+                    | map('trim')
+                    | list))
+         | dict2items
+         | selectattr('value', 'ne', '')
+         | items2dict }}
+
+# Rebuild each list one element at a time so per-element `item` is correctly
+# scoped. The naive `map('combine', {'device': item.device})` form re-uses
+# the OUTER loop's item for every map element, which collapses all rows to
+# whatever the last iteration matched.
+- name: Remap raid_arrays.device entries individually
+  ansible.builtin.set_fact:
+    raid_arrays: >-
+      {{ (raid_arrays | rejectattr('name', 'equalto', item.name) | list)
+         + [ item | combine({'device': _device_remap[item.device]
+                              | default(item.device)}) ] }}
+  loop: "{{ raid_arrays }}"
+  loop_control:
+    label: "{{ item.name }}"
+  when:
+    - _device_remap | default({}) | length > 0
+    - item.device in (_device_remap | default({}))
+
+- name: Remap mount_points[*].device entries individually
+  ansible.builtin.set_fact:
+    mount_points: >-
+      {{ (mount_points | rejectattr('path', 'equalto', item.path) | list)
+         + [ item | combine({'device': _device_remap[item.device]
+                              | default(item.device)}) ] }}
+  loop: "{{ mount_points }}"
+  loop_control:
+    label: "{{ item.path }} ({{ item.device }})"
+  when:
+    - _device_remap | default({}) | length > 0
+    - mount_points is defined
+    - item.device in (_device_remap | default({}))
+
 - name: Verify drives exist before creating RAID
   ansible.builtin.stat:
     path: "{{ item.1 }}"
@@ -74,7 +186,12 @@
   loop_control:
     label: "{{ item.name }}"
   when:
+    # Skip if an array with this planned name already exists.
     - item.name not in existing_arrays
+    # Skip if the drives are already in SOME md array (under any name).
+    # Prevents the "Device or resource busy" failure when the kernel
+    # auto-assembled the array as /dev/md127 after a reboot.
+    - item.name not in (_arrays_already_present | default([]))
     - force_raid_recreate | default(false) or item.name not in existing_arrays
   register: raid_creation
   failed_when: false
