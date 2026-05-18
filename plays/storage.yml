@@ -12,11 +12,11 @@
 
   pre_tasks:
     # Load vault.yml if available (optional — password can be passed via -e)
-    # NOTE: plays/ are imported, so playbook_dir resolves to .../plays/ — not
-    # the repo root. The "../" hop is required for the import_playbook layout.
+    # vars/main.yml defines repo_root = "{{ playbook_dir }}/..", which handles
+    # the plays/-subdirectory resolution. See vars/main.yml header for context.
     - name: Load vault variables (if available)
       ansible.builtin.include_vars:
-        file: "{{ playbook_dir }}/../vars/vault.yml"
+        file: "{{ repo_root }}/vars/vault.yml"
       failed_when: false
       no_log: true
 
@@ -88,13 +88,16 @@
             state: started
           register: hs_api_tcp_check
 
+        # Use /cntl (cluster controller) for the auth probe. Confirmed present
+        # on Anvil deployments where /cluster returns 404. The downstream role
+        # uses /nodes for real work; /cntl is just a cheap auth check.
         - name: Authenticate against Hammerspace API
           ansible.builtin.shell:
             cmd: >-
               curl -s -o /dev/stdout -w "\n%{http_code}" --max-time 15
               {{ '' if (hammerspace_api_validate_certs | default(false)) else '-k' }}
               -u "{{ hammerspace_api_user }}:{{ hammerspace_api_password }}"
-              "https://{{ hammerspace_api_host }}:{{ hammerspace_api_port | default(8443) }}/mgmt/v1.2/rest/cluster"
+              "https://{{ hammerspace_api_host }}:{{ hammerspace_api_port | default(8443) }}/mgmt/v1.2/rest/cntl"
           register: hs_api_auth_check
           changed_when: false
           failed_when: false
@@ -153,7 +156,11 @@
 
     - name: Display node registration status
       ansible.builtin.debug:
-        msg: "Node '{{ hammerspace_node_name | default(inventory_hostname) }}' {{ 'is already registered in Hammerspace - will skip NFS service restart' if node_already_in_hammerspace | default(false) else 'is not yet registered in Hammerspace' }}"
+        msg: >-
+          Node '{{ hammerspace_node_name | default(inventory_hostname) }}'
+          {{ 'is already registered in Hammerspace - will skip NFS service restart'
+             if node_already_in_hammerspace | default(false)
+             else 'is not yet registered in Hammerspace' }}
       when: hammerspace_api_host is defined
 
   roles:
@@ -210,7 +217,7 @@
 
     - name: Set report file path
       ansible.builtin.set_fact:
-        instance_report_file: "{{ playbook_dir }}/instance_report.csv"
+        instance_report_file: "{{ repo_root }}/instance_report.csv"
       run_once: true
 
     - name: Create instance report CSV with header

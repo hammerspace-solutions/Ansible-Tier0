@@ -5,6 +5,76 @@ without needing remote hosts. They run against `localhost` with
 `connection: local`, so they are safe to run on a developer laptop
 or in CI.
 
+## Single-entry runner
+
+`tests/run_all.sh` runs every check in this directory plus the static
+checks (YAML parsing, `bash -n`, `shellcheck`, `yamllint`,
+`ansible-playbook --syntax-check`). Wire it into CI:
+
+```bash
+./tests/run_all.sh
+```
+
+Exits non-zero if anything fails. Prints a per-step summary at the end.
+
+## `test_repo_root.yml`
+
+Regression test for the `playbook_dir` → `repo_root` migration. The
+`plays/*.yml` imports cause `playbook_dir` to resolve to `.../plays/`
+instead of the repo root, breaking any task that does
+`{{ playbook_dir }}/X` for files like `container/Containerfile`,
+`vars/vault.yml`, `payload/`, or `gpu_fabric_data.txt`. Three production
+incidents (2026-05-15, 2026-05-18) traced back to this pattern.
+
+Fix: `vars/main.yml` defines `repo_root: "{{ playbook_dir }}/.."` once;
+every controller-side file path uses `{{ repo_root }}/...`.
+
+Test cases:
+
+| # | Scenario | Expected |
+|---|----------|----------|
+| 1 | `vars/main.yml` contains the literal `repo_root: "{{ playbook_dir }}/.."` | Pass — definition present |
+| 2 | `repo_root` chains through `plays/..` → resolves to repo root | Pass for vault.yml + Containerfile paths |
+| 3 | **Audit:** grep for stray `playbook_dir` references in `roles/` and `plays/` | Empty — every controller path uses `repo_root` |
+| 4 | Sanity: `container/`, `vars/`, `payload/` actually exist at the repo root | Pass |
+
+TEST 3 is the regression-prevention case: if anyone re-introduces
+`{{ playbook_dir }}/X` in a role or play, this test fails before merge.
+
+## `test_protected_vs_md_split.yml`
+
+Regression test for the 2026-05-18 "0 RAID arrays" incident (Peter's
+re-run on hosts that already had working arrays). The boot-drive
+safety overhaul had put md array members in `_protected_disks`, which
+excluded all data disks from discovery on re-runs.
+
+Test cases:
+
+| # | Scenario | Expected behavior |
+|---|----------|-------------------|
+| 1 | OLD merged behavior (md members in `_protected_disks`) | Reproduces the bug — only fresh disks survive discovery |
+| 2 | NEW split (md members in `_md_member_disks` only) | All non-boot disks survive discovery; md members listed informationally |
+| 3 | Boot disk somehow leaks into candidate list | Safety gate in `build_raid_arrays.yml` still fires (no regression of boot protection) |
+| 4 | End-to-end: discovery + `raid_setup._device_remap` | `mount_points[0].device` correctly remapped from `/dev/md0` to `/dev/md127` |
+
+## `test_run_sh_locale.sh`
+
+Unit tests for the locale-fallback picker in `scripts/run.sh`. Pure
+bash, no Ansible required. 8 cases covering:
+
+- en_US.UTF-8 present → picks it first
+- en_US.UTF-8 missing → falls back to C.UTF-8
+- lowercase variants (utf8 vs UTF-8)
+- ko_KR-only host → returns empty (triggers the install-instruction error path)
+- empty locale list (broken libc)
+- case-insensitive matching
+- priority ordering when all 4 candidates are present
+
+Run directly:
+```bash
+bash tests/integration/test_run_sh_locale.sh
+```
+
 ## `test_raid_idempotency.yml`
 
 Regression test for the 2026-05-15 EBUSY-on-re-run incident (Peter's bug),
@@ -78,6 +148,7 @@ FAILED: 0
 ## When to run
 
 - Before merging any change to `roles/nvme_discovery/tasks/detect_boot_device.yml`
+  (protected-disk / md-member / LVM-PV split, hard-fail behavior)
 - Before merging any change to the `rejectattr` filters in
   `roles/nvme_discovery/tasks/main.yml`
 - Before merging any change to the safety gate in
@@ -85,9 +156,10 @@ FAILED: 0
 - After any change to `roles/precheck/tasks/validate_drives.yml`
 - After any change to `roles/raid_setup/tasks/main.yml` (idempotency
   detection, `_device_remap`, or the per-element list rebuild pattern)
+- After any change to `scripts/run.sh` (locale-fallback chain)
 
-Wire into pre-merge CI with whatever Ansible runtime is already
-installed in the pipeline.
+Wire into pre-merge CI as `./tests/run_all.sh` — it runs every check in one
+command and exits non-zero on any failure.
 
 ## Notes
 

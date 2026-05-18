@@ -18,7 +18,7 @@
 
 - name: Copy Containerfile into build dir
   ansible.builtin.copy:
-    src: "{{ playbook_dir }}/container/Containerfile"
+    src: "{{ repo_root }}/container/Containerfile"
     dest: "{{ di_container_build_dir }}/Containerfile"
     mode: "0644"
 

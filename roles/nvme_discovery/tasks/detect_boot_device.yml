@@ -1,24 +1,26 @@
 ---
-# Detect ALL disks that host any active filesystem, mounted partition, swap,
-# md member, or LVM PV. Returns a LIST of disk names (not just one) so we
-# defend against:
-#   - Multi-disk boot setups (separate /boot, /, /home)
-#   - LVM/md spanning multiple disks
-#   - Active swap on a non-root disk
-#   - Hot-spares or leftover PVs from prior deployments
+# Detect disks the playbook must NOT recreate, split into two lists:
 #
-# Output facts:
-#   _detected_boot_device  — string, primary boot disk (back-compat with old code)
-#   _protected_disks       — list of all disk names that MUST NOT be touched
+#   _protected_disks  (STRICT) — disks hosting the OS, root, /boot, swap, or
+#                                any mounted filesystem. Never touched.
+#                                Boot-drive incident driver: empty detection
+#                                used to silently allow mkfs on the boot NVMe.
 #
-# Hard-fails if detection produces an empty list (instead of silently allowing
-# mkfs on the boot drive — earlier prod incident: bare-metal Korean-locale host
-# had detection silently return "" and the playbook proceeded to mkfs the
-# boot NVMe; only saved by kernel reporting EBUSY).
+#   _md_member_disks  (ADOPT)  — disks that are members of an existing md
+#                                array. NOT excluded from discovery; raid_setup
+#                                detects existing membership and remaps
+#                                mount_points to the actual /dev/mdN instead
+#                                of recreating the array.
+#
+#   _lvm_pv_disks     (INFO)   — disks that back LVM PVs. Informational only;
+#                                PVs that host mounted FS or swap are already
+#                                in _protected_disks via the mount/swap walk.
+#
+# Hard-fails if _protected_disks is empty (defense-in-depth against the
+# 2026-05-14 boot-drive incident).
 
-- name: Detect all protected disks (boot, root, mounted, swap, md, LVM)
+- name: Detect protected disks (boot / root / mounted FS / swap) — STRICT
   ansible.builtin.shell:
-    # Force bash: dash (Ubuntu /bin/sh) does not support `set -o pipefail`.
     executable: /bin/bash
     cmd: |
       set -uo pipefail
@@ -28,9 +30,6 @@
           local src="$1"
           [ -z "$src" ] && return
           [ -b "$src" ] || return
-
-          # lsblk -s walks INVERSE dependencies (this device built on what?).
-          # Continue up until we reach TYPE=disk, which is the physical disk.
           lsblk -nrpso NAME,TYPE "$src" 2>/dev/null | \
               awk '$2 == "disk" {print $1}' | \
               while read -r disk; do
@@ -39,36 +38,59 @@
       }
 
       {
-          # 1. Mounted filesystems
+          # Mounted filesystems
           awk '/^\/dev\// {print $1}' /proc/mounts | while read -r dev; do
               resolve_to_disk "$dev"
           done
 
-          # 2. Active swap
+          # Active swap
           awk 'NR>1 && $1 ~ /^\/dev\// {print $1}' /proc/swaps | while read -r dev; do
               resolve_to_disk "$dev"
-          done
-
-          # 3. Active md array members
-          if [ -r /proc/mdstat ]; then
-              grep -oE '[a-z]+[0-9]+(n[0-9]+)?(p[0-9]+)?\[[0-9]+\]' /proc/mdstat 2>/dev/null | \
-                  sed 's/\[[0-9]*\]$//' | \
-                  while read -r member; do
-                      resolve_to_disk "/dev/$member"
-                  done
-          fi
-
-          # 4. LVM PVs (catches PVs from leftover/orphan VGs)
-          pvs --noheadings -o pv_name 2>/dev/null | while read -r pv; do
-              resolve_to_disk "$(echo "$pv" | xargs)"
           done
       } | sort -u | grep -v '^$' || true
   register: _protected_disks_raw
   changed_when: false
 
-- name: Set _protected_disks fact
+- name: Detect md array members (ADOPT — informational, do not exclude)
+  ansible.builtin.shell:
+    executable: /bin/bash
+    cmd: |
+      set -uo pipefail
+      export LC_ALL=C LANG=C
+      if [ -r /proc/mdstat ]; then
+          grep -oE '[a-z]+[0-9]+(n[0-9]+)?(p[0-9]+)?\[[0-9]+\]' /proc/mdstat 2>/dev/null | \
+              sed 's/\[[0-9]*\]$//' | sort -u | while read -r member; do
+                  # Walk up to physical disk
+                  base=$(lsblk -nrpso NAME,TYPE "/dev/${member}" 2>/dev/null | \
+                         awk '$2 == "disk" {print $1; exit}')
+                  [ -n "$base" ] && basename "$base"
+              done | sort -u | grep -v '^$' || true
+      fi
+  register: _md_members_raw
+  changed_when: false
+
+- name: Detect LVM PV disks (INFO — informational, do not exclude)
+  ansible.builtin.shell:
+    executable: /bin/bash
+    cmd: |
+      set -uo pipefail
+      export LC_ALL=C LANG=C
+      pvs --noheadings -o pv_name 2>/dev/null | while read -r pv; do
+          pv=$(echo "$pv" | xargs)
+          [ -z "$pv" ] && continue
+          [ -b "$pv" ] || continue
+          base=$(lsblk -nrpso NAME,TYPE "$pv" 2>/dev/null | \
+                 awk '$2 == "disk" {print $1; exit}')
+          [ -n "$base" ] && basename "$base"
+      done | sort -u | grep -v '^$' || true
+  register: _lvm_pvs_raw
+  changed_when: false
+
+- name: Set protected / md-member / LVM facts
   ansible.builtin.set_fact:
     _protected_disks: "{{ _protected_disks_raw.stdout_lines | default([]) | reject('equalto', '') | list }}"
+    _md_member_disks: "{{ _md_members_raw.stdout_lines | default([]) | reject('equalto', '') | list }}"
+    _lvm_pv_disks: "{{ _lvm_pvs_raw.stdout_lines | default([]) | reject('equalto', '') | list }}"
 
 - name: Identify the disk hosting / (root filesystem)
   ansible.builtin.shell:
@@ -90,23 +112,30 @@
          if (_root_disk_raw.stdout | default('') | trim) | length > 0
          else (_protected_disks[0] | default('')) }}
 
-- name: Display protected disks
+- name: Display disk classification
   ansible.builtin.debug:
     msg: |
-      Protected disks (boot / root / mounted / swap / md / LVM — will NEVER be touched):
-      {% for d in _protected_disks %}
-        - /dev/{{ d }}
-      {% else %}
-        (none — detection returned empty)
-      {% endfor %}
-      Primary boot disk: {{ _detected_boot_device | default('UNKNOWN') }}
+      Disk classification (boot-drive safety):
+        STRICT protected (boot / mounted FS / swap — NEVER touched):
+        {% for d in _protected_disks %}  - /dev/{{ d }}
+        {% else %}  (none — detection returned empty)
+        {% endfor %}
+        Existing md array members (will be ADOPTED, not recreated):
+        {% for d in _md_member_disks %}  - /dev/{{ d }}
+        {% else %}  (none)
+        {% endfor %}
+        LVM PV disks (informational):
+        {% for d in _lvm_pv_disks %}  - /dev/{{ d }}
+        {% else %}  (none)
+        {% endfor %}
+        Primary boot disk: {{ _detected_boot_device | default('UNKNOWN') }}
 
 - name: FAIL if no protected disks were detected (refusing to risk the boot drive)
   ansible.builtin.fail:
     msg: |
-      Boot / protected-disk detection returned an EMPTY list.
-      Refusing to proceed — running RAID / mkfs without an exclusion list
-      could wipe the OS disk.
+      Boot / protected-disk detection returned an EMPTY list (no mounted FS,
+      no swap). Refusing to proceed — running RAID / mkfs without an
+      exclusion list could wipe the OS disk.
 
       Debug:
         /proc/mounts entries: {{ ansible_mounts | default([]) | length }}

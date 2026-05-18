@@ -100,7 +100,7 @@
 # Approach: Check if a GPU fabric mapping file exists on the controller
 - name: Check for GPU fabric mapping file
   ansible.builtin.stat:
-    path: "{{ playbook_dir }}/gpu_fabric_data.txt"
+    path: "{{ repo_root }}/gpu_fabric_data.txt"
   register: _fabric_file_stat
   delegate_to: localhost
   become: false
@@ -108,7 +108,7 @@
 
 - name: Read GPU fabric mapping file
   ansible.builtin.slurp:
-    src: "{{ playbook_dir }}/gpu_fabric_data.txt"
+    src: "{{ repo_root }}/gpu_fabric_data.txt"
   register: _fabric_file_raw
   delegate_to: localhost
   become: false
@@ -186,7 +186,7 @@
 
 - name: Append this node's fabric mapping to gpu_fabric_data.txt
   ansible.builtin.lineinfile:
-    path: "{{ playbook_dir }}/gpu_fabric_data.txt"
+    path: "{{ repo_root }}/gpu_fabric_data.txt"
     regexp: ".*{{ inventory_hostname }}.*"
     line: "{{ _gpu_fabric_ocid }} {{ inventory_hostname }} {{ ansible_default_ipv4.address | default('') }}"
     create: true

@@ -955,16 +955,26 @@ The decommission playbook:
 **Problem:** `ERROR: Ansible could not initialize the preferred locale: unsupported locale setting`
 This occurs on hosts whose system locale isn't UTF-8 (Korean ko_KR, Japanese ja_JP, etc.).
 ```bash
-# Solution A: export UTF-8 in the shell, then run ansible-playbook normally
-export LANG=en_US.UTF-8
-export LC_ALL=en_US.UTF-8
-ansible-playbook site.yml -i inventory.yml
-
-# Solution B: use the wrapper (sets the locale for you)
+# Recommended: use the wrapper (auto-detects which UTF-8 locale is installed
+# and falls back through en_US.UTF-8 → C.UTF-8 → en_US.utf8 → C.utf8)
 ./scripts/run.sh playbook site.yml -i inventory.yml
 ./scripts/run.sh inventory -i inventory.yml --list
+
+# Or export manually:
+export LANG=C.UTF-8 LC_ALL=C.UTF-8
+ansible-playbook site.yml -i inventory.yml
 ```
-If `en_US.UTF-8` isn't installed, generate it with `locale-gen en_US.UTF-8` (Debian/Ubuntu) or `localectl set-locale LANG=en_US.UTF-8` (RHEL/Rocky).
+
+**Problem:** `./scripts/run.sh: setlocale: cannot change locale (en_US.UTF-8)` followed by `Ansible could not initialize the preferred locale`.
+The wrapper detected zero installed UTF-8 locales. Generate one for the host:
+```bash
+# Debian / Ubuntu
+sudo locale-gen en_US.UTF-8
+# RHEL / Rocky / Alma
+sudo dnf install -y glibc-langpack-en
+# Universal (works everywhere):
+sudo localedef -i en_US -f UTF-8 en_US.UTF-8
+```
 
 ### RAID create fails with `Device or resource busy` on re-run
 
@@ -1020,11 +1030,71 @@ Run the regression suite to confirm safety logic on the affected host:
 ./scripts/run.sh playbook tests/integration/test_boot_device_safety.yml -i localhost, -c local
 ```
 
+### `Discovery produced 0 RAID arrays` on a host with existing arrays
+
+**Symptom:** Re-run on a host that has working `/dev/mdN` arrays + `/hammerspace/hsvol*` mounts from a prior deployment:
+```
+TASK [nvme_discovery : Validate discovery produced RAID arrays]
+fatal: [inst-X]: FAILED!
+  msg: Discovery produced 0 RAID arrays. Check:
+       - storage_type is set correctly (current: scsi)
+       - Drives exist and are not excluded by boot device detection
+       - boot_device detected: sda
+```
+
+**Cause (fixed 2026-05-18):** the boot-drive safety overhaul put md array members in `_protected_disks`, so all the data disks (sdb/sdc/...) got excluded from `scsi_devices` / `nvme_devices`, leaving 0 drives to plan RAID from.
+
+**Fix:** detection now splits into:
+- `_protected_disks` (strict) — only mounted FS + active swap. EXCLUDED from discovery.
+- `_md_member_disks` — informational. NOT excluded. `raid_setup` finds the existing `/dev/mdN`, skips `mdadm --create`, and remaps `mount_points[*].device` to the actual device.
+- `_lvm_pv_disks` — informational.
+
+Pull the fix (`Solutions/Ansible-Tier0` ≥ the bump that follows commit `29947f7`) and re-run. The role will log:
+```
+Planned array 'md0' is already assembled as /dev/md127 — skipping mdadm --create.
+```
+
+Regression test: `tests/integration/test_protected_vs_md_split.yml` (4 cases).
+
+### `Could not find or access '/.../plays/...'` (DI or other role)
+
+**Symptom:** A task in `roles/di/`, `roles/hammerspace_integration/`, or anywhere else fails with:
+```
+Could not find or access '/home/.../Ansible-Tier0/plays/container/Containerfile'
+on the Ansible Controller.
+```
+(or `plays/vars/vault.yml`, `plays/payload/...`, etc.)
+
+**Cause:** Same `playbook_dir` resolution gotcha as the vault.yml bug. `playbook_dir` resolves to `.../plays/` inside imported plays — references like `{{ playbook_dir }}/container/Containerfile` therefore look for `plays/container/Containerfile`, which doesn't exist.
+
+**Fix:** `vars/main.yml` defines `repo_root: "{{ playbook_dir }}/.."` once. All controller-side paths in `plays/` and `roles/` use `{{ repo_root }}/X` instead of `{{ playbook_dir }}/X`. Pull a build that includes this change.
+
+**Regression test:** `tests/integration/test_repo_root.yml` includes an audit pass (`grep playbook_dir roles/ plays/`) that fails CI if anyone re-introduces the old pattern.
+
+### "Hammerspace API configuration missing" after a successful preflight earlier in the run
+
+**Symptom:** The first play prints `Hammerspace API preflight OK` (or quietly skips it without error), several nodes register successfully, then the serialized integration play fails on assertions:
+```
+fatal: [inst-X]: FAILED!
+  assertion: hammerspace_api_password is defined
+  evaluated_to: false
+  msg: Hammerspace API configuration missing. Set hammerspace_api_host,
+       hammerspace_api_user, hammerspace_api_password
+```
+You can `curl -u admin:$VAULTPW` against the Anvil API and it works.
+
+**Cause:** Each play in `plays/*.yml` is imported via `import_playbook`, which means **`playbook_dir` resolves to `Ansible-Tier0/plays/`, not to the repo root.** Until commit `29947f7` the vault-loading task referenced `{{ playbook_dir }}/vars/vault.yml` → `Ansible-Tier0/plays/vars/vault.yml` (doesn't exist). The result: `vault_hammerspace_api_password` was never defined, so the templated value of `hammerspace_api_password = "{{ vault_hammerspace_api_password }}"` raised an undefined-variable error at render time. The first play's API preflight skipped silently because its `when:` guard collapsed to false; the serialized play used the role's stricter `assert` and failed.
+
+**Fixed:** all four `plays/*.yml` now use `{{ playbook_dir }}/../vars/vault.yml`. Pull `29947f7` (or later) and re-run.
+
+**For new plays added under `plays/`:** always reference vault as `{{ playbook_dir }}/../vars/vault.yml`. The inline comment in each play file documents the layout assumption.
+
 ### Hammerspace API preflight failure
 
-The playbook calls `/mgmt/v1.2/rest/cluster` at the start to validate connectivity + credentials. If it fails, you'll see one of:
+The playbook calls `/mgmt/v1.2/rest/cntl` at the start to validate connectivity + credentials. If it fails, you'll see one of:
 - **`HTTP response code: 401`** — bad `hammerspace_api_user` or `vault_hammerspace_api_password`. Verify the credentials in your vault file.
 - **`HTTP response code: 403`** — user authenticated but lacks the admin role.
+- **`HTTP response code: 404`** — Anvil version doesn't expose `/cntl`. Update to a recent Anvil build or change the endpoint in `plays/storage.yml` to something the cluster does respond to (e.g. `/nodes`).
 - **`HTTP response code: 0`** — TCP reached the host but TLS or HTTP didn't respond. Check the port (`hammerspace_api_port`, default 8443) and Anvil health.
 - **`wait_for` timeout** — `hammerspace_api_host` is unreachable from the control machine. Check routing/security lists.
 

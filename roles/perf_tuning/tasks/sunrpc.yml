@@ -12,8 +12,8 @@
     sysctl_set: true
     ignoreerrors: true
   loop:
-    - { key: "sunrpc.tcp_slot_table_entries", value: "{{ perf_sunrpc_tcp_slot_table_entries }}" }
-    - { key: "sunrpc.tcp_max_slot_table_entries", value: "{{ perf_sunrpc_tcp_max_slot_table_entries }}" }
+    - {key: "sunrpc.tcp_slot_table_entries", value: "{{ perf_sunrpc_tcp_slot_table_entries }}"}
+    - {key: "sunrpc.tcp_max_slot_table_entries", value: "{{ perf_sunrpc_tcp_max_slot_table_entries }}"}
   failed_when: false
 
 - name: Persist sunrpc sysctl settings in /etc/sysctl.d/99-hammerspace-sunrpc.conf

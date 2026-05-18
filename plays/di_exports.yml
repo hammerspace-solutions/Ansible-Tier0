@@ -16,11 +16,11 @@
     - ../vars/main.yml
 
   pre_tasks:
-    # NOTE: plays/ are imported, so playbook_dir resolves to .../plays/ — not
-    # the repo root. The "../" hop is required for the import_playbook layout.
+    # vars/main.yml defines repo_root = "{{ playbook_dir }}/..", which handles
+    # the plays/-subdirectory resolution. See vars/main.yml header for context.
     - name: Load vault variables (if available)
       ansible.builtin.include_vars:
-        file: "{{ playbook_dir }}/../vars/vault.yml"
+        file: "{{ repo_root }}/vars/vault.yml"
       failed_when: false
       no_log: true
 

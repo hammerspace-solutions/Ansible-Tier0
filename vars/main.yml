@@ -4,6 +4,19 @@
 # Customize these values for your environment
 
 # ============================================================================
+# Path Helpers
+# ============================================================================
+# site.yml imports plays/*.yml via `import_playbook`, which makes
+# `playbook_dir` resolve to .../plays/ — not the repo root. Any task that
+# references files relative to the repo (Containerfile, payload/, vars/) must
+# use `{{ repo_root }}` instead of `{{ playbook_dir }}`, otherwise it looks
+# under plays/ and fails ("Could not find or access ...").
+#
+# 2026-05-15 incident: vault.yml lookup pointed at plays/vars/vault.yml.
+# 2026-05-18 incident: DI Containerfile lookup pointed at plays/container/.
+repo_root: "{{ playbook_dir }}/.."
+
+# ============================================================================
 # RAID Configuration
 # ============================================================================
 
@@ -917,7 +930,7 @@ di_image_source: "build"
 # di_image_url: "https://example.com/hammerspace-di-{{ ansible_architecture }}.tar"
 
 # When di_image_source == "local" (path on the Ansible controller)
-# di_image_local_path: "{{ playbook_dir }}/payload/hammerspace-di-{{ ansible_architecture }}.tar"
+# di_image_local_path: "{{ repo_root }}/payload/hammerspace-di-{{ ansible_architecture }}.tar"
 
 # When di_image_source == "registry"
 # di_image_registry_ref: "registry.example.com/hammerspace-di:{{ ansible_architecture }}"
@@ -952,7 +965,7 @@ di_tarball_url: "https://trans.doit.hammerspace.com/download/tier0/components/el
 
 # When di_rpm_source == "directory": directory on the controller containing
 # *.rpm files (and optionally add_node.py). Drop RPMs here and it works.
-di_payload_local_dir: "{{ playbook_dir }}/payload"
+di_payload_local_dir: "{{ repo_root }}/payload"
 
 # Babeltrace RPM URL (RedHat only - not in standard repos)
 babeltrace_rpm_url: "https://dl.rockylinux.org/pub/rocky/9/devel/x86_64/os/Packages/b/babeltrace-1.5.8-10.el9.x86_64.rpm"
