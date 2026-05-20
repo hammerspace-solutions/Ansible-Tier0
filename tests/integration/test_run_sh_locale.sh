@@ -99,6 +99,61 @@ en_US.utf8
 C.utf8" \
     "en_US.UTF-8"
 
+# ============================================================================
+# ANSIBLE_LOG_PATH default behavior
+# ============================================================================
+
+echo
+printf '%s\n' "RUN.SH ANSIBLE_LOG_PATH default tests"
+printf '%s\n' "====================================="
+
+run_log_case() {
+    local name="$1"; shift
+    local preset="$1"; shift
+    local custom_dir="$1"; shift
+    local expected_dir="$1"; shift
+
+    # `[[ ... ]] && export` returns the LHS's exit code when LHS is false,
+    # which under `set -e` aborts the script. Use `if` blocks instead.
+    unset ANSIBLE_LOG_PATH ANSIBLE_LOG_DIR
+    if [[ -n "${preset}" ]];     then export ANSIBLE_LOG_PATH="${preset}";     fi
+    if [[ -n "${custom_dir}" ]]; then export ANSIBLE_LOG_DIR="${custom_dir}"; fi
+
+    if [[ -z "${ANSIBLE_LOG_PATH:-}" ]]; then
+        _log_dir="${ANSIBLE_LOG_DIR:-${HOME}/logs}"
+        export ANSIBLE_LOG_PATH="${_log_dir}/ansible-stub.log"
+    fi
+
+    local got_dir
+    got_dir="$(dirname "${ANSIBLE_LOG_PATH}")"
+
+    if [[ "${got_dir}" == "${expected_dir}" ]]; then
+        passes=$((passes+1))
+        printf '  ✓ %s\n' "${name}"
+    else
+        failures+=("${name}: expected dir '${expected_dir}', got '${got_dir}'")
+        printf '  ✗ %s\n' "${name}"
+    fi
+
+    unset ANSIBLE_LOG_PATH ANSIBLE_LOG_DIR
+}
+
+# 1. no preset → default to ~/logs
+run_log_case "no preset → ~/logs/" \
+    "" "" "${HOME}/logs"
+
+# 2. ANSIBLE_LOG_DIR override → that dir
+run_log_case "ANSIBLE_LOG_DIR=/tmp/x → /tmp/x" \
+    "" "/tmp/x" "/tmp/x"
+
+# 3. user-set ANSIBLE_LOG_PATH wins over the default
+run_log_case "user-set ANSIBLE_LOG_PATH preserved" \
+    "/some/custom/path.log" "" "/some/custom"
+
+# 4. user-set ANSIBLE_LOG_PATH wins even when ANSIBLE_LOG_DIR is also set
+run_log_case "ANSIBLE_LOG_PATH overrides ANSIBLE_LOG_DIR" \
+    "/abs/log.log" "/ignored" "/abs"
+
 echo
 echo "================================="
 echo "PASSED: ${passes}"

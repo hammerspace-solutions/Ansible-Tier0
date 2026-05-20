@@ -49,6 +49,18 @@ export LANG="${_picked}"
 export LC_ALL="${_picked}"
 export LANGUAGE="${_picked}"
 
+# ANSIBLE_LOG_PATH: shell aliases (e.g. `alias ansible-playbook='ANSIBLE_LOG_PATH=... ansible-playbook'`
+# in .bashrc) do NOT propagate through `exec` in this script. Set a sensible
+# default here so every invocation gets logged. User's pre-set value wins.
+if [[ -z "${ANSIBLE_LOG_PATH:-}" ]]; then
+    _log_dir="${ANSIBLE_LOG_DIR:-${HOME}/logs}"
+    mkdir -p "${_log_dir}" 2>/dev/null || true
+    # Declare-then-export (SC2155): $(...) failure must not be hidden by export's exit code.
+    _log_file="${_log_dir}/ansible-$(date +%Y%m%d_%H%M%S).log"
+    export ANSIBLE_LOG_PATH="${_log_file}"
+fi
+echo "[run.sh] locale=${_picked}  ANSIBLE_LOG_PATH=${ANSIBLE_LOG_PATH}" >&2
+
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" &> /dev/null && pwd)"
 REPO_ROOT="$(cd -- "${SCRIPT_DIR}/.." &> /dev/null && pwd)"
 cd "${REPO_ROOT}"
@@ -63,7 +75,11 @@ Subcommands:
   vault      <args>   -> ansible-vault <args>
   raw        <cmd>    -> exec <cmd> (full ansible-* command)
 
-Active locale: ${_picked}
+Active locale     : ${_picked}
+ANSIBLE_LOG_PATH  : ${ANSIBLE_LOG_PATH}
+
+Tip: override the log path with ANSIBLE_LOG_PATH=/your/path ./scripts/run.sh ...
+     or change the directory with ANSIBLE_LOG_DIR=/your/dir ./scripts/run.sh ...
 EOF
     exit 1
 fi

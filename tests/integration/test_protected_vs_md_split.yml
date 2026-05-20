@@ -271,6 +271,69 @@
             _test_failures: "{{ _test_failures + ['TEST 4: ' ~ (ansible_failed_result.msg | default('unknown'))] }}"
 
     # ========================================================================
+    # TEST 5: 2026-05-20 regression — /dev/mdN mounted at a DATA path
+    # (/hammerspace/*) must NOT cause its members to be classified as
+    # protected. detect_boot_device.yml now restricts the mount-walk to a
+    # SYSTEM-mountpoint allow-list; this test simulates the shell output
+    # under the old vs new behavior.
+    # ========================================================================
+    - name: 'TEST 5: md mounted at /hammerspace/* — members must NOT be protected'
+      block:
+        # Old behavior: walk all /proc/mounts, lsblk -nrpso resolves md127
+        # mounted at /hammerspace/hsvol0 to its members sdb+sdc → they
+        # incorrectly end up in _protected_disks.
+        - name: Simulate OLD shell output (walked all mounts)
+          ansible.builtin.set_fact:
+            _protected_disks_OLD:
+              - sda      # boot (correct)
+              - sdb      # md member, incorrectly marked (BUG)
+              - sdc      # md member, incorrectly marked (BUG)
+
+        # New behavior: only system mountpoints walked. /hammerspace/* is
+        # NOT in the allow-list → sdb/sdc are not added to _protected_disks.
+        - name: Simulate NEW shell output (system-only walk)
+          ansible.builtin.set_fact:
+            _protected_disks_NEW:
+              - sda      # boot, mounted at / (correct)
+            _md_member_disks_NEW:
+              - sdb      # informational
+              - sdc      # informational
+
+        - name: 'TEST 5 ASSERT: NEW behavior excludes only the boot disk'
+          ansible.builtin.assert:
+            that:
+              - _protected_disks_NEW == ['sda']
+              - _md_member_disks_NEW | sort == ['sdb', 'sdc']
+            fail_msg: |
+              NEW system-mount-only walk should yield protected=[sda]
+              and md-member=[sdb,sdc]. Got protected={{ _protected_disks_NEW }},
+              md-members={{ _md_member_disks_NEW }}.
+
+        - name: Apply rejectattr with NEW list to mock scsi_all_devices
+          ansible.builtin.set_fact:
+            scsi_devices_NEW: >-
+              {{ scsi_all_devices_mock
+                 | rejectattr('name', 'in', _protected_disks_NEW)
+                 | list }}
+
+        - name: 'TEST 5 ASSERT: sdb, sdc, sdd survive discovery; sda excluded'
+          ansible.builtin.assert:
+            that:
+              - scsi_devices_NEW | length == 3
+              - (scsi_devices_NEW | map(attribute='name') | list | sort) == ['sdb', 'sdc', 'sdd']
+            fail_msg: |
+              REGRESSION: with /dev/md127 mounted at /hammerspace/hsvol0, sdb
+              and sdc should still pass discovery. Got:
+              {{ scsi_devices_NEW | map(attribute='name') | list }}
+
+        - name: Record TEST 5 pass
+          ansible.builtin.set_fact:
+            _test_passes: "{{ _test_passes + ['TEST 5: /dev/md127 mounted at /hammerspace/* — members survive discovery'] }}"
+      rescue:
+        - ansible.builtin.set_fact:
+            _test_failures: "{{ _test_failures + ['TEST 5: ' ~ (ansible_failed_result.msg | default('unknown'))] }}"
+
+    # ========================================================================
     # Report
     # ========================================================================
     - name: Print test report

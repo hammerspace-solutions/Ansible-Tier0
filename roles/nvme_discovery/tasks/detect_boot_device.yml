@@ -19,12 +19,24 @@
 # Hard-fails if _protected_disks is empty (defense-in-depth against the
 # 2026-05-14 boot-drive incident).
 
-- name: Detect protected disks (boot / root / mounted FS / swap) — STRICT
+- name: Detect protected disks (SYSTEM mountpoints + swap) — STRICT
   ansible.builtin.shell:
     executable: /bin/bash
     cmd: |
       set -uo pipefail
       export LC_ALL=C LANG=C
+
+      # CRITICAL: protected disks are disks hosting the OS — NOT arbitrary
+      # mounts. If we walked all of /proc/mounts and a Hammerspace data
+      # array (/dev/md127 mounted at /hammerspace/hsvol0) is in the list,
+      # `lsblk -nrpso` would return the md members (sdb, sdc, ...) as
+      # TYPE=disk and they'd get marked protected — breaking re-runs that
+      # need to adopt those arrays. 2026-05-20 regression (Peter).
+      #
+      # So: explicit allow-list of SYSTEM mountpoints. Walk only those.
+      # Data mounts (anywhere else) are NOT walked.
+
+      SYSTEM_MOUNTS="/ /boot /boot/efi /usr /usr/local /var /home /etc /opt /srv /tmp /lib /lib64 /sbin /bin /root"
 
       resolve_to_disk() {
           local src="$1"
@@ -38,12 +50,13 @@
       }
 
       {
-          # Mounted filesystems
-          awk '/^\/dev\// {print $1}' /proc/mounts | while read -r dev; do
-              resolve_to_disk "$dev"
+          # System mountpoints — walk to physical disks
+          for mp in $SYSTEM_MOUNTS; do
+              src=$(findmnt -n -o SOURCE "$mp" 2>/dev/null || true)
+              [ -n "$src" ] && resolve_to_disk "$src"
           done
 
-          # Active swap
+          # Active swap is always system-critical
           awk 'NR>1 && $1 ~ /^\/dev\// {print $1}' /proc/swaps | while read -r dev; do
               resolve_to_disk "$dev"
           done
