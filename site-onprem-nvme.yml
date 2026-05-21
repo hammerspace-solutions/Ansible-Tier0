@@ -10,7 +10,6 @@
 
   vars_files:
     - vars/main.yml
-    - vars/vault.yml
 
   vars:
     # On-prem NVMe overrides
@@ -21,6 +20,13 @@
     flush_iptables: false
 
   pre_tasks:
+    - name: Load vault variables (if available)
+      ansible.builtin.include_vars:
+        file: "{{ playbook_dir }}/vars/vault.yml"
+      when: lookup('file', playbook_dir ~ '/vars/vault.yml', errors='ignore') | default('', true) | length > 0
+      failed_when: false
+      no_log: true
+
     # Force on-prem NVMe settings (highest precedence via set_fact)
     - name: Set on-prem NVMe configuration
       ansible.builtin.set_fact:

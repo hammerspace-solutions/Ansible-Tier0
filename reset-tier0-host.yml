@@ -52,7 +52,6 @@
 
   vars_files:
     - vars/main.yml
-    - vars/vault.yml
 
   vars:
     # -------------------------------------------------------------------------
@@ -98,6 +97,14 @@
   # PRE-TASKS — validate, discover targets, build teardown lists
   # ===========================================================================
   pre_tasks:
+
+    # ---- Load vault (optional) -----------------------------------------------
+    - name: Load vault variables (if available)
+      ansible.builtin.include_vars:
+        file: "{{ playbook_dir }}/vars/vault.yml"
+      when: lookup('file', playbook_dir ~ '/vars/vault.yml', errors='ignore') | default('', true) | length > 0
+      failed_when: false
+      no_log: true
 
     # ---- Safety gate --------------------------------------------------------
     - name: Safety gate — require explicit confirmation

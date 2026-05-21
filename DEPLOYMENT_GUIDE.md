@@ -953,28 +953,36 @@ The decommission playbook:
 ### Locale errors (non-English control hosts)
 
 **Problem:** `ERROR: Ansible could not initialize the preferred locale: unsupported locale setting`
-This occurs on hosts whose system locale isn't UTF-8 (Korean ko_KR, Japanese ja_JP, etc.).
+on hosts whose system locale isn't UTF-8 (Korean ko_KR, Japanese ja_JP, etc.).
 ```bash
-# Recommended: use the wrapper (auto-detects which UTF-8 locale is installed
-# and falls back through en_US.UTF-8 → C.UTF-8 → en_US.utf8 → C.utf8)
+# Recommended: use the wrapper (auto-detects installed UTF-8 locale and
+# also sets ANSIBLE_LOG_PATH to ~/logs/ansible-<timestamp>.log)
 ./scripts/run.sh playbook site.yml -i inventory.yml
 ./scripts/run.sh inventory -i inventory.yml --list
-
-# Or export manually:
-export LANG=C.UTF-8 LC_ALL=C.UTF-8
-ansible-playbook site.yml -i inventory.yml
 ```
 
-**Problem:** `./scripts/run.sh: setlocale: cannot change locale (en_US.UTF-8)` followed by `Ansible could not initialize the preferred locale`.
-The wrapper detected zero installed UTF-8 locales. Generate one for the host:
+**Problem:** wrapper reports `ERROR: no UTF-8 locale is installed on this host`.
+Generate one:
 ```bash
-# Debian / Ubuntu
-sudo locale-gen en_US.UTF-8
-# RHEL / Rocky / Alma
-sudo dnf install -y glibc-langpack-en
-# Universal (works everywhere):
-sudo localedef -i en_US -f UTF-8 en_US.UTF-8
+sudo locale-gen en_US.UTF-8                    # Debian / Ubuntu
+sudo dnf install -y glibc-langpack-en          # RHEL / Rocky / Alma
+sudo localedef -i en_US -f UTF-8 en_US.UTF-8   # universal
 ```
+
+### Ansible logs aren't showing up where the alias expects
+
+**Problem:** You set `alias ansible-playbook='ANSIBLE_LOG_PATH=... ansible-playbook'` in `~/.bashrc`, but `./scripts/run.sh playbook ...` doesn't honor it.
+
+**Cause:** Shell aliases don't propagate through `exec`. The wrapper now sets a sensible default itself:
+```bash
+ANSIBLE_LOG_PATH=${HOME}/logs/ansible-<timestamp>.log
+```
+Override at invocation time:
+```bash
+ANSIBLE_LOG_PATH=/custom/path.log ./scripts/run.sh playbook site.yml -i inventory.yml
+ANSIBLE_LOG_DIR=/var/log/ansible  ./scripts/run.sh playbook site.yml -i inventory.yml
+```
+The wrapper echoes the active log path to stderr on every invocation.
 
 ### RAID create fails with `Device or resource busy` on re-run
 
@@ -1042,19 +1050,19 @@ fatal: [inst-X]: FAILED!
        - boot_device detected: sda
 ```
 
-**Cause (fixed 2026-05-18):** the boot-drive safety overhaul put md array members in `_protected_disks`, so all the data disks (sdb/sdc/...) got excluded from `scsi_devices` / `nvme_devices`, leaving 0 drives to plan RAID from.
+**Cause (fixed 2026-05-18, hardened 2026-05-20):** the boot-drive safety overhaul put md array members in `_protected_disks`, so all the data disks got excluded from discovery. The 2026-05-18 split into three lists fixed the bare `/proc/mdstat` path, but `/proc/mounts` had a second leak: walking `/dev/md127` (mounted at `/hammerspace/hsvol0`) inversely via `lsblk -nrpso NAME,TYPE` lists its physical members (sdb, sdc, ...) as TYPE=disk and they ended up in `_protected_disks` again.
 
-**Fix:** detection now splits into:
-- `_protected_disks` (strict) — only mounted FS + active swap. EXCLUDED from discovery.
+**Fix:** detection now uses three lists with a key restriction on the mount walk:
+- `_protected_disks` (strict) — **only walks SYSTEM mountpoints** via an explicit allow-list (`/`, `/boot`, `/boot/efi`, `/usr`, `/var`, `/home`, swap, etc.). Data mounts like `/hammerspace/*` are NOT walked. Plus active swap.
 - `_md_member_disks` — informational. NOT excluded. `raid_setup` finds the existing `/dev/mdN`, skips `mdadm --create`, and remaps `mount_points[*].device` to the actual device.
 - `_lvm_pv_disks` — informational.
 
-Pull the fix (`Solutions/Ansible-Tier0` ≥ the bump that follows commit `29947f7`) and re-run. The role will log:
+Pull the fix (`Solutions/Ansible-Tier0` ≥ `224f49d`) and re-run. The role will log:
 ```
 Planned array 'md0' is already assembled as /dev/md127 — skipping mdadm --create.
 ```
 
-Regression test: `tests/integration/test_protected_vs_md_split.yml` (4 cases).
+Regression test: `tests/integration/test_protected_vs_md_split.yml` (5 cases — TEST 5 covers exactly this `/dev/mdN mounted at /hammerspace/*` scenario).
 
 ### `Could not find or access '/.../plays/...'` (DI or other role)
 

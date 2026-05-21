@@ -24,10 +24,10 @@ Tier 0 transforms existing local NVMe storage on GPU servers into ultra-fast, pe
 - **iptables Flush**: Automatically flushes iptables rules at playbook start to prevent connectivity issues
 - **Mount Point Protection**: systemd guard services and auto-remount watchdog to prevent accidental unmounts
 - **Boot-Drive Safety**: disk detection produces three lists:
-  - `_protected_disks` (strict) — disks hosting `/`, mounted FS, or active swap. EXCLUDED from discovery. Empty list hard-fails the playbook unless `allow_empty_protected_disks: true`.
+  - `_protected_disks` (strict) — disks hosting an OS / system mount (`/`, `/boot`, `/boot/efi`, `/usr`, `/var`, `/home`, swap, etc.) via an explicit allow-list. EXCLUDED from discovery. Empty list hard-fails the playbook unless `allow_empty_protected_disks: true`. **Data mounts (e.g. `/hammerspace/*`) are intentionally NOT walked** — otherwise re-runs on hosts with an existing `/dev/md127` mounted at `/hammerspace/hsvol0` would mis-classify `sdb`/`sdc` as protected via the md→members inverse-lsblk walk.
   - `_md_member_disks` — disks that are members of an existing md array. NOT excluded; `raid_setup` adopts the existing array and remaps `mount_points[*].device` to `/dev/mdN`.
   - `_lvm_pv_disks` — informational only.
-  A final assertion before any `mkfs` rejects candidates that overlap `_protected_disks`. Regression tests: `tests/integration/test_boot_device_safety.yml`, `tests/integration/test_protected_vs_md_split.yml`.
+  A final assertion before any `mkfs` rejects candidates that overlap `_protected_disks`. Regression tests: `tests/integration/test_boot_device_safety.yml`, `tests/integration/test_protected_vs_md_split.yml` (5 cases).
 - **Performance BKMs (`perf_tuning` role)**: sunrpc TCP slot tables (128/65536), NFSD direct I/O + 1MB max_block_size, 4MB block-device read-ahead, NIC IRQ pinning to NUMA-local CPUs, high-throughput TCP sysctl. Each section independently toggleable.
 - **API Preflight**: Tests Hammerspace API reachability and credentials at playbook start — fails in <30 s on bad password or unreachable Anvil instead of hours into RAID/FS setup.
 - **Single-source Anvil IP**: Set `hammerspace_api_host` once; `hammerspace_nodes`, `network_test_targets`, and `hammerspace_cluster_mgmt_ip` derive from it.
@@ -208,18 +208,21 @@ ansible-galaxy collection install -r requirements.yml
 > Without this, the RPMs will be small pointer files and container builds will fail.
 > Install Git LFS: `brew install git-lfs` (macOS) or `apt install git-lfs` (Linux).
 
-> **Non-English locale (Korean / CJK / non-UTF-8 systems):** Ansible aborts with
-> `ERROR: Ansible could not initialize the preferred locale: unsupported locale setting`
-> on hosts whose default locale isn't UTF-8. Use the wrapper script — it auto-detects
-> which UTF-8 locale is installed (`en_US.UTF-8` → `C.UTF-8` → `en_US.utf8` → `C.utf8`)
-> and exports the first match. If none exist it prints the install command for your distro:
+> **Recommended invocation: `./scripts/run.sh playbook ...`.** The wrapper:
+> - Auto-detects an installed UTF-8 locale (`en_US.UTF-8` → `C.UTF-8` → `en_US.utf8` → `C.utf8`) — required on non-English hosts (Korean / CJK / etc.) where Ansible would otherwise abort with `ERROR: Ansible could not initialize the preferred locale`.
+> - Defaults `ANSIBLE_LOG_PATH=${HOME}/logs/ansible-<timestamp>.log` so every run is logged (shell aliases on `ansible-playbook` don't propagate through `exec`, so this is the only reliable way).
+> - Prints the active locale + log path to stderr on every invocation.
+>
+> Overrides:
 > ```bash
-> ./scripts/run.sh playbook site.yml -i inventory.yml
-> ./scripts/run.sh inventory -i inventory.yml --list
+> ANSIBLE_LOG_PATH=/custom/path.log ./scripts/run.sh playbook site.yml -i inventory.yml
+> ANSIBLE_LOG_DIR=/var/log/ansible  ./scripts/run.sh playbook site.yml -i inventory.yml
 > ```
-> Or export manually:
+> Or skip the wrapper and configure manually:
 > ```bash
 > export LANG=C.UTF-8 LC_ALL=C.UTF-8
+> export ANSIBLE_LOG_PATH=~/logs/ansible-$(date +%Y%m%d_%H%M%S).log
+> ansible-playbook site.yml -i inventory.yml
 > ```
 
 ### 2. Configure Inventory

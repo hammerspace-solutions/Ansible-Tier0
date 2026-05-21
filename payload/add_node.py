@@ -57,7 +57,7 @@ class API:
             page += 1
         return returnvalue
 
-    def post(self, data, endpoint='nodes?ignoreIpConflicts=true'):
+    def post(self, data, endpoint='nodes'):
         url = f'https://{self._host}:{self._port}{self._mgmt_path}/{endpoint}'
         response = requests.post(url, json=data, auth=self._basic, verify=False)
         if not response.ok:

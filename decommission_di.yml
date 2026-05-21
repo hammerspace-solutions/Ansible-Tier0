@@ -8,6 +8,12 @@
 #   ansible-playbook decommission_di.yml -i inventory.yml --check
 #   ansible-playbook decommission_di.yml -i inventory.yml --limit "mover101"
 #   ansible-playbook decommission_di.yml -i inventory.yml
+#
+# If vars/vault.yml is encrypted:
+#   ansible-playbook decommission_di.yml -i inventory.yml --ask-vault-pass
+#
+# Or pass the password directly:
+#   ansible-playbook decommission_di.yml -i inventory.yml -e hammerspace_api_password=YourPass
 
 - name: Decommission Hammerspace Data Instantiator (DI)
   hosts: di_nodes
@@ -17,16 +23,32 @@
 
   vars_files:
     - vars/main.yml
-    - vars/vault.yml
 
   pre_tasks:
+    # Load vault.yml if it exists and is readable (optional — password can
+    # also be passed via -e hammerspace_api_password=xxx)
+    - name: Check if vars/vault.yml exists
+      ansible.builtin.stat:
+        path: "{{ playbook_dir }}/vars/vault.yml"
+      register: _vault_file
+      delegate_to: localhost
+      become: false
+
+    - name: Load vault variables (if available)
+      ansible.builtin.include_vars:
+        file: "{{ playbook_dir }}/vars/vault.yml"
+      when: _vault_file.stat.exists | default(false)
+      failed_when: false
+
     - name: Verify required variables are defined
       ansible.builtin.assert:
         that:
-          - hammerspace_cluster_mgmt_ip is defined
+          - hammerspace_cluster_mgmt_ip is defined or hammerspace_api_host is defined
           - hammerspace_api_user is defined
-          - hammerspace_api_password is defined
-        fail_msg: "Required Hammerspace cluster variables are not defined. Check vars/main.yml"
+        fail_msg: >-
+          Required Hammerspace cluster variables are not defined.
+          Check vars/main.yml and ensure vars/vault.yml is accessible
+          (run with --ask-vault-pass if encrypted).
 
     - name: Display decommission warning
       ansible.builtin.debug:
@@ -35,6 +57,7 @@
           About to decommission DI node: {{ di_node_name | default(inventory_hostname) }}
           Evacuate data: {{ di_decommission_evacuate_data | default(true) }}
           Stop services: {{ di_decommission_stop_services | default(true) }}
+          Cleanup local: {{ di_decommission_cleanup | default(true) }}
           ============================
 
   tasks:

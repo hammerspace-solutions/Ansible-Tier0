@@ -26,7 +26,6 @@
 
   vars_files:
     - vars/main.yml
-    - vars/vault.yml
 
   vars:
     # Override these if needed
@@ -156,10 +155,15 @@
         - di_add_node_script_url | default('') | length > 0
 
     # --- Build ---
-    - name: "Build container image ({{ _di_arch }})"
+    - name: Set container platform for build
+      ansible.builtin.set_fact:
+        _di_container_platform: "{{ 'linux/arm64' if ansible_architecture == 'aarch64' else 'linux/amd64' }}"
+
+    - name: "Build container image ({{ _di_arch }}, {{ _di_container_platform }})"
       ansible.builtin.command:
         cmd: >-
           {{ di_container_runtime | default('podman') }} build
+          --platform {{ _di_container_platform }}
           --build-arg BASE_IMAGE={{ di_container_base_image | default('rockylinux:9') }}
           -t {{ _di_image_tag }}
           -f {{ di_container_build_dir | default('/opt/hammerspace/di-container') }}/Containerfile

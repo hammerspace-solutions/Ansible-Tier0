@@ -10,14 +10,22 @@
 #
 # Activation control:
 #   di_activate: true  (default) - Install, start services, and register with cluster
-#   di_activate: false            - Install and configure only; do NOT start pd-di
-#                                   or register with the cluster. Use this to pre-stage
-#                                   DI on nodes and activate later with:
-#                                     ansible-playbook site.yml --tags di-activate -e deploy_di=true
+#   di_activate: false           - Install and configure only; do NOT start pd-di
+#                                  or register with the cluster. Pre-stage DI on
+#                                  nodes and activate later with:
+#                                    ansible-playbook site.yml --tags di-activate \
+#                                      -e deploy_di=true -e di_activate=true
+#
+# TAG PROPAGATION NOTE: `include_tasks` (dynamic include) does NOT propagate
+# tags from the include task to its inner tasks. Use `apply: tags: [...]` to
+# add tags to every task in the included file. Without `apply:`, a
+# `--tags di-activate` invocation reaches the include but every inner task
+# gets skipped — which is what Peter hit on 2026-05-21.
 
 # Load OS-specific variables (packages, extensions)
 - name: Include OS-specific variables
   ansible.builtin.include_vars: "{{ ansible_os_family | lower }}.yml"
+  tags: [always]
 
 - name: Display DI activation mode
   ansible.builtin.debug:
@@ -25,13 +33,17 @@
       DI activation: {{ 'ACTIVE — will start services and register'
       if (di_activate | default(true) | bool)
       else 'PRE-DEPLOY ONLY — install and configure, skip services and registration' }}
+  tags: [always]
 
 # =============================================================================
 # Common prechecks (both modes)
 # =============================================================================
 
 - name: Run DI prechecks
-  ansible.builtin.include_tasks: precheck.yml
+  ansible.builtin.include_tasks:
+    file: precheck.yml
+    apply:
+      tags: [di, di-precheck]
   tags: [di, di-precheck]
 
 # =============================================================================
@@ -39,12 +51,18 @@
 # =============================================================================
 
 - name: Install DI dependencies
-  ansible.builtin.include_tasks: dependencies.yml
+  ansible.builtin.include_tasks:
+    file: dependencies.yml
+    apply:
+      tags: [di, di-dependencies]
   when: di_deployment_type == 'host'
   tags: [di, di-dependencies]
 
 - name: Install pd-di package
-  ansible.builtin.include_tasks: install.yml
+  ansible.builtin.include_tasks:
+    file: install.yml
+    apply:
+      tags: [di, di-install]
   when: di_deployment_type == 'host'
   tags: [di, di-install]
 
@@ -56,26 +74,40 @@
 # =============================================================================
 
 - name: Configure SELinux for DI
-  ansible.builtin.include_tasks: selinux.yml
+  ansible.builtin.include_tasks:
+    file: selinux.yml
+    apply:
+      tags: [di, di-selinux]
   tags: [di, di-selinux]
 
 - name: Configure firewall for DI
-  ansible.builtin.include_tasks: firewall.yml
+  ansible.builtin.include_tasks:
+    file: firewall.yml
+    apply:
+      tags: [di, di-firewall]
   tags: [di, di-firewall]
 
 # =============================================================================
-# Host-mode services + registration (skipped when di_activate is false)
+# Host-mode services + registration (skipped when di_activate is false).
+# These tasks carry the `di-activate` tag so `--tags di-activate` reaches them
+# AND (via apply:) every inner task in services.yml / register.yml.
 # =============================================================================
 
 - name: Start DI services
-  ansible.builtin.include_tasks: services.yml
+  ansible.builtin.include_tasks:
+    file: services.yml
+    apply:
+      tags: [di, di-services, di-activate]
   when:
     - di_deployment_type == 'host'
     - di_activate | default(true) | bool
   tags: [di, di-services, di-activate]
 
 - name: Register DI node with Hammerspace
-  ansible.builtin.include_tasks: register.yml
+  ansible.builtin.include_tasks:
+    file: register.yml
+    apply:
+      tags: [di, di-register, di-activate]
   when:
     - di_deployment_type == 'host'
     - di_activate | default(true) | bool
@@ -86,19 +118,28 @@
 # =============================================================================
 
 - name: Install container runtime
-  ansible.builtin.include_tasks: container_runtime.yml
+  ansible.builtin.include_tasks:
+    file: container_runtime.yml
+    apply:
+      tags: [di, di-container]
   when: di_deployment_type == 'container'
   tags: [di, di-container]
 
 - name: Build DI container image (pre-deploy — no start)
-  ansible.builtin.include_tasks: container_build.yml
+  ansible.builtin.include_tasks:
+    file: container_build.yml
+    apply:
+      tags: [di, di-container]
   when:
     - di_deployment_type == 'container'
     - not (di_activate | default(true) | bool)
   tags: [di, di-container]
 
 - name: Build, deploy, and register DI container
-  ansible.builtin.include_tasks: container_deploy.yml
+  ansible.builtin.include_tasks:
+    file: container_deploy.yml
+    apply:
+      tags: [di, di-container, di-activate]
   when:
     - di_deployment_type == 'container'
     - di_activate | default(true) | bool
@@ -125,3 +166,4 @@
           --limit {{ inventory_hostname }}
       ============================================
   when: not (di_activate | default(true) | bool)
+  tags: [always]

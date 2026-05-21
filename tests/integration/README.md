@@ -56,11 +56,13 @@ Test cases:
 | 2 | NEW split (md members in `_md_member_disks` only) | All non-boot disks survive discovery; md members listed informationally |
 | 3 | Boot disk somehow leaks into candidate list | Safety gate in `build_raid_arrays.yml` still fires (no regression of boot protection) |
 | 4 | End-to-end: discovery + `raid_setup._device_remap` | `mount_points[0].device` correctly remapped from `/dev/md0` to `/dev/md127` |
+| 5 | `/dev/md127` mounted at `/hammerspace/hsvol0` (2026-05-20 regression) | Members `sdb`/`sdc` NOT classified as protected — `detect_boot_device.yml` only walks system mountpoints, not data mounts |
 
 ## `test_run_sh_locale.sh`
 
-Unit tests for the locale-fallback picker in `scripts/run.sh`. Pure
-bash, no Ansible required. 8 cases covering:
+Unit tests for `scripts/run.sh`. Pure bash, no Ansible required. Two sections:
+
+### Locale fallback (8 cases)
 
 - en_US.UTF-8 present → picks it first
 - en_US.UTF-8 missing → falls back to C.UTF-8
@@ -69,6 +71,13 @@ bash, no Ansible required. 8 cases covering:
 - empty locale list (broken libc)
 - case-insensitive matching
 - priority ordering when all 4 candidates are present
+
+### ANSIBLE_LOG_PATH default (4 cases)
+
+- No preset env vars → defaults to `${HOME}/logs/ansible-<timestamp>.log`
+- `ANSIBLE_LOG_DIR=/tmp/x` → log path lands under `/tmp/x`
+- User-set `ANSIBLE_LOG_PATH` wins over the default
+- User-set `ANSIBLE_LOG_PATH` wins even when `ANSIBLE_LOG_DIR` is also set
 
 Run directly:
 ```bash
