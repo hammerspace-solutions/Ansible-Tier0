@@ -320,7 +320,7 @@ Each section can be toggled independently. Role defaults live in `roles/perf_tun
 | `deploy_di` | `false` | Master switch: enable DI deployment on `di_nodes` group. |
 | `di_activate` | `true` | Activation control: `true` = full deploy; `false` = install only, skip services and registration. Activate later with `--tags di-activate -e di_activate=true`. |
 | `di_auto_export` | `true` | Auto-wire DI node IPs into Tier 0 NFS exports (`no_root_squash`). Eliminates manual `mover_nodes` editing. |
-| `di_deployment_type` | `"host"` | Deployment mode: `"host"` (RPM install) or `"container"` (podman/docker). |
+| `di_deployment_type` | `"host"` | Deployment mode: `"host"` (RPM install), `"container"` (podman/docker), or `"kubernetes"` (DaemonSet on containerd). |
 
 ## DI Container Settings
 
@@ -393,9 +393,46 @@ Each section can be toggled independently. Role defaults live in `roles/perf_tun
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `di_decommission_evacuate_data` | `true` | Evacuate data before removing volumes. |
-| `di_decommission_stop_services` | `true` | Stop DI services after decommission. |
+| `di_decommission_stop_services` | `true` | Stop DI services after decommission (skipped in k8s mode). |
 | `di_decommission_poll_retries` | `180` | Max poll retries (180 x 10s = 30 min). |
 | `di_decommission_poll_delay` | `10` | Poll delay in seconds. |
+| `di_k8s_decommission_delete_namespace` | `false` | When `true`, k8s decommission also deletes the `di_k8s_namespace`. |
+
+## DI Kubernetes Mode (`di_deployment_type: "kubernetes"`)
+
+Only consulted when `di_deployment_type == "kubernetes"`. Operator MUST set
+`di_k8s_registry_namespace` (and registry credentials, unless using a public
+image). Everything else has a sensible default.
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `di_k8s_kubeconfig` | `$KUBECONFIG` or `~/.kube/config` | Kubeconfig the controller uses for all k8s API calls. |
+| `di_k8s_namespace` | `"hammerspace-di"` | Namespace for the DaemonSet, secrets, pull-secret. Created with PodSecurityAdmission = `privileged`. |
+| `di_k8s_psa_level` | `"privileged"` | PSA profile applied to the namespace (`privileged` required for hostNetwork + privileged SC). |
+| `di_k8s_node_selector_label` | `"hammerspace.io/di"` | Node label that scheduling gates on. Same label is the customer-visible "DI is here" tag. |
+| `di_k8s_node_selector_value` | `"true"` | Value paired with the selector label. |
+| `di_k8s_target_nodes` | `[]` | Explicit list of k8s node names to label. When empty, hostnames from the `di_nodes` inventory group are used. |
+| `di_k8s_tolerations` | `[]` | List of toleration dicts so the DS schedules on tainted GPU nodes. Example: `[{key: "nvidia.com/gpu", operator: "Exists", effect: "NoSchedule"}]`. |
+| `di_k8s_priority_class` | `""` | Optional `priorityClassName` (recommend `system-node-critical` for production). |
+| `di_k8s_status_label` | `"hammerspace.io/di-status"` | Node label set by `kubernetes_status_label.yml` after rollout — values `ready` / `degraded` / `failed`. |
+| `di_k8s_registry` | `"{{ oci_region }}.ocir.io"` | Image registry hostname. |
+| `di_k8s_registry_namespace` | *(required)* | OCIR tenancy namespace (or equivalent registry path segment). |
+| `di_k8s_image_repository` | `"hammerspace-di"` | Image repository name within the registry. |
+| `di_k8s_image_tag` | `"5.1.41-452"` | Image tag (defaults to `pd_di_version`). |
+| `di_k8s_image_arch_suffix` | `true` | Append `-amd64`/`-arm64` to pushed tags (one per build host). |
+| `di_k8s_image_pull_secret` | `"hammerspace-di-pull"` | Name of the `kubernetes.io/dockerconfigjson` Secret created in the namespace. |
+| `di_k8s_registry_username` | `""` | Registry username (set in `vars/vault.yml`). |
+| `di_k8s_registry_password` | `""` | Registry password/token (set in `vars/vault.yml`). |
+| `di_k8s_registry_email` | `"noreply@hammerspace.com"` | Registry email (cosmetic; required by some registries). |
+| `di_k8s_api_credentials_secret` | `"hammerspace-api-credentials"` | Opaque Secret holding `HAMMERSPACE_API_*` (consumed by the initContainer via `envFrom`). |
+| `di_k8s_build_push` | `true` | Build + push the image as part of the playbook. Set `false` to deploy a pre-existing image. |
+| `di_k8s_build_tool` | `"auto"` | Build tool: `auto` (pick first available), `podman`, `docker`, `buildah`, `nerdctl`. |
+| `di_k8s_build_multiarch_manifest` | `false` | When `true` and `buildah` is present on the build host, assemble a multi-arch manifest list. |
+| `di_k8s_rollout_timeout` | `300` | Seconds to wait for the DaemonSet rollout. |
+| `di_k8s_rollout_poll_delay` | `5` | Seconds between rollout polls. |
+| `di_k8s_status_retries` | `30` | Retries when fetching DI pods for the status-label snapshot. |
+| `di_k8s_status_delay` | `5` | Delay between status-label retries. |
+| `di_k8s_auto_install_collection` | `true` | Auto-install `kubernetes.core` via `ansible-galaxy` on the controller. Set `false` to manage it manually. |
 
 ## Tier 0 Host Reset (reset-tier0-host.yml)
 

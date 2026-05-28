@@ -17,3 +17,7 @@ collections:
   # Requires: pip3 install google-auth requests
   - name: google.cloud
     version: ">=1.0.0"
+  # Kubernetes / DI k8s deployment mode (di_deployment_type: "kubernetes").
+  # Auto-installed by plays/di.yml when di_k8s_auto_install_collection: true.
+  - name: kubernetes.core
+    version: ">=3.0.0"

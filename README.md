@@ -58,11 +58,12 @@ Tier 0 transforms existing local NVMe storage on GPU servers into ultra-fast, pe
 - **Prometheus Monitoring**: Enable Prometheus exporters for metrics collection
 
 ### Data Instantiator (DI / NFS Mover)
-- **DI Deployment**: Install pd-di on dedicated mover nodes via RPM (host mode) or container (podman/docker)
-- **Two Deployment Modes**: Host-native RPM install or containerized deployment for heterogeneous OS environments
+- **DI Deployment**: Install pd-di on dedicated mover nodes via RPM (host mode), container (podman/docker), or as a Kubernetes DaemonSet on containerd
+- **Three Deployment Modes**: Host-native RPM, containerized (podman/docker), or Kubernetes — selected by `di_deployment_type`
+- **Kubernetes / containerd**: Build/push image, create namespace + PSA + secrets, label nodes, apply DaemonSet, register via initContainer, set per-node DI status label — all one playbook
 - **Package Source Flexibility**: Download from URL, copy from local tarball, or use loose RPMs in `payload/` directory
 - **Automatic Registration**: Registers DI nodes with Hammerspace cluster via `add_node.py`
-- **DI Decommission**: Graceful node removal with volume evacuation, API deregistration, and service teardown
+- **DI Decommission**: Graceful node removal with volume evacuation, API deregistration, and service teardown (kubernetes mode also tears down the DaemonSet + labels)
 
 ### Platform Support
 - **Multi-Distribution Support**: Works on Debian, Ubuntu, RHEL, Rocky Linux, CentOS
@@ -141,19 +142,28 @@ ansible-storage-setup/
     ├── firewall_setup/          # Firewall configuration (firewalld/ufw/iptables)
     ├── di/                      # Data Instantiator (DI / NFS Mover) - consolidated role
     │   ├── tasks/
-    │   │   ├── main.yml             # Orchestrator (dispatches to sub-tasks)
-    │   │   ├── precheck.yml         # OS/network validation
-    │   │   ├── dependencies.yml     # EPEL, lttng, jemalloc, babeltrace
-    │   │   ├── install.yml          # Stage & install pd-di RPM
-    │   │   ├── selinux.yml          # Disable SELinux (RedHat)
-    │   │   ├── firewall.yml         # Open ports 9095/9096
-    │   │   ├── services.yml         # Enable lttng + pd-di services
-    │   │   ├── register.yml         # Register via add_node.py
-    │   │   ├── container_runtime.yml    # Install podman/docker
-    │   │   ├── container_deploy.yml     # Build & run DI container
-    │   │   └── decommission.yml     # Evacuate volumes & remove node
-    │   ├── vars/                    # OS-specific packages (redhat.yml, debian.yml)
-    │   └── defaults/main.yml       # Default ports, container flags
+    │   │   ├── main.yml                       # Orchestrator (dispatches to host/container/kubernetes)
+    │   │   ├── precheck.yml                   # OS/network + k8s-mode precheck
+    │   │   ├── dependencies.yml               # EPEL, lttng, jemalloc, babeltrace (host mode)
+    │   │   ├── install.yml                    # Stage & install pd-di RPM (host mode)
+    │   │   ├── selinux.yml                    # Disable SELinux (RedHat)
+    │   │   ├── firewall.yml                   # Open ports 9095/9096 (host firewall)
+    │   │   ├── services.yml                   # Enable lttng + pd-di services (host mode)
+    │   │   ├── register.yml                   # Register via add_node.py (host mode)
+    │   │   ├── container_runtime.yml          # Install podman/docker (passthrough for containerd)
+    │   │   ├── container_deploy.yml           # Build & run DI container (podman/docker)
+    │   │   ├── kubernetes_deploy.yml          # K8s mode: labels + ns + secrets + DS + rollout
+    │   │   ├── kubernetes_image_build.yml     # K8s mode: build/push image to registry
+    │   │   ├── kubernetes_status_label.yml    # K8s mode: set hammerspace.io/di-status per node
+    │   │   ├── kubernetes_decommission.yml    # K8s mode: tear down DS + labels + secrets
+    │   │   └── decommission.yml               # Evacuate volumes & remove node (all modes)
+    │   ├── templates/                         # Jinja2 manifests (k8s mode)
+    │   │   ├── namespace.yaml.j2              # Namespace + PSA labels
+    │   │   ├── image_pull_secret.yaml.j2      # Registry pull secret
+    │   │   ├── api_credentials_secret.yaml.j2 # Hammerspace API creds (envFrom)
+    │   │   └── daemonset.yaml.j2              # Privileged DaemonSet (hostNet + systemd + init)
+    │   ├── vars/                              # OS-specific packages (redhat.yml, debian.yml)
+    │   └── defaults/main.yml                  # Default ports, container flags, k8s defaults
     └── hammerspace_integration/ # Anvil API integration
         ├── tasks/
         │   ├── main.yml             # Main integration orchestration
@@ -2279,6 +2289,84 @@ di_node_netmask_prefix: 24
 di_decommission_evacuate_data: true
 di_decommission_stop_services: true
 ```
+
+### Kubernetes / containerd Deployment
+
+> **Community / additive integration.** The upstream-supported DI runtimes
+> remain `host` (RPM) and `container` (podman/docker). The k8s mode targets
+> sites running pd-di as a DaemonSet on a pre-existing Kubernetes cluster
+> where containerd is the CRI (e.g., OCI BM GPU shapes).
+
+**Cluster prerequisites (the operator is responsible for these):**
+
+- Kubernetes ≥ 1.24 with `containerd` configured as the CRI and
+  `SystemdCgroup = true` in `/etc/containerd/config.toml`.
+- The `di_nodes` inventory group's hostnames must match `kubectl get nodes`
+  (or set `di_k8s_target_nodes` explicitly).
+- A reachable container registry the cluster can pull from (default config
+  assumes OCIR — set `di_k8s_registry`, `di_k8s_registry_namespace`, and
+  registry credentials in `vars/vault.yml`).
+- A kubeconfig on the Ansible controller with rights to create namespaces,
+  label nodes, and create Secrets + DaemonSets in `di_k8s_namespace`.
+- One or more build hosts (any arch — typically one per target arch) in a
+  `di_k8s_build_hosts` inventory group, each with one of:
+  `podman`, `docker`, `buildah`, or `nerdctl` installed.
+
+**One-playbook workflow** (build, push, label, apply, register, status label):
+
+```bash
+# 1. Edit vars/main.yml — set the three k8s-required values
+#      di_deployment_type: "kubernetes"
+#      di_k8s_registry_namespace: "<your-oci-tenancy>"
+#      di_k8s_tolerations: [{key: "nvidia.com/gpu", operator: "Exists", effect: "NoSchedule"}]
+#    Store registry creds in vars/vault.yml:
+#      di_k8s_registry_username: "..."
+#      di_k8s_registry_password: "..."
+
+# 2. Run. Everything (build, push, deploy, register, status-label) is one command.
+ansible-playbook site.yml -i inventory.yml -e deploy_di=true
+
+# 3. Refresh node status labels later without a full re-deploy
+ansible-playbook plays/di.yml -e deploy_di=true --tags di-k8s-status
+```
+
+**Verification:**
+
+```bash
+# Per-node status (the customer-visible tags)
+kubectl get nodes -L hammerspace.io/di,hammerspace.io/di-status
+
+# Pod surface
+kubectl -n hammerspace-di get pods -o wide
+
+# pd-di health — kubectl logs alone won't show pd-di because the image
+# runs systemd as PID 1. Use journalctl inside the pod:
+kubectl -n hammerspace-di exec ds/hammerspace-di -- journalctl -u pd-di -n 100
+```
+
+**Decommission:**
+
+```bash
+ansible-playbook decommission_di.yml -i inventory.yml -e deploy_di=true
+```
+
+K8s-mode decommission removes the status + deployment labels (which evicts
+pods), deletes the DaemonSet + Secrets, then runs the standard API-side
+node deregistration. Set `di_k8s_decommission_delete_namespace: true` to
+also delete the namespace.
+
+**Files added for k8s mode:**
+
+- `roles/di/tasks/kubernetes_deploy.yml` — top-level orchestration
+- `roles/di/tasks/kubernetes_image_build.yml` — autodetect build tool, build + push
+- `roles/di/tasks/kubernetes_status_label.yml` — snapshot pod state → node label
+- `roles/di/tasks/kubernetes_decommission.yml` — teardown
+- `roles/di/templates/namespace.yaml.j2` — Namespace + PSA labels
+- `roles/di/templates/image_pull_secret.yaml.j2` — pull-secret Secret
+- `roles/di/templates/api_credentials_secret.yaml.j2` — API-creds Secret
+- `roles/di/templates/daemonset.yaml.j2` — privileged DaemonSet (hostNet, systemd, initContainer for registration)
+
+See `VARIABLE_REFERENCE.md` § "DI Kubernetes Mode" for the full variable list.
 
 ## Zero-SSH Deployment (OCI Run Command)
 

@@ -9,14 +9,69 @@
 # inventory group. They can overlap with storage_servers if DI runs on the
 # same hosts.
 #
-# Two deployment modes:
-#   di_deployment_type: "host"      - Install pd-di RPM directly on the OS
-#   di_deployment_type: "container" - Build & run pd-di in a container (podman/docker)
+# Three deployment modes:
+#   di_deployment_type: "host"       - Install pd-di RPM directly on the OS
+#   di_deployment_type: "container"  - Build & run pd-di in a container (podman/docker)
+#   di_deployment_type: "kubernetes" - Build/push image + apply DaemonSet to k8s
+#                                      cluster (containerd CRI)
 #
 # Usage:
 #   ansible-playbook site.yml -i inventory.yml -e deploy_di=true
 #   ansible-playbook site.yml -i inventory.yml --tags di
 #   ansible-playbook site.yml -i inventory.yml --tags di --limit "mover101"
+#   ansible-playbook site.yml -i inventory.yml --tags di-k8s-status   # refresh status labels
+
+# ===========================================================================
+# K8s build play. Runs first, ONLY when k8s mode is selected AND a build host
+# is present in inventory. No-op for host/container modes (end_play early).
+# ===========================================================================
+
+- name: Build and push DI image for Kubernetes
+  hosts: di_k8s_build_hosts
+  become: true
+  gather_facts: true
+
+  vars_files:
+    - ../vars/main.yml
+
+  pre_tasks:
+    - name: Load vault variables (if available)
+      ansible.builtin.include_vars:
+        file: "{{ repo_root }}/vars/vault.yml"
+      failed_when: false
+      no_log: true
+      tags: [always]
+
+    - name: Skip build play unless k8s mode + build_push is enabled
+      ansible.builtin.meta: end_play
+      when:
+        - (not (deploy_di | default(false) | bool))
+          or (di_deployment_type | default('host') != 'kubernetes')
+          or (not (di_k8s_build_push | default(true) | bool))
+      tags: [always]
+
+    - name: Auto-install kubernetes.core (controller)
+      ansible.builtin.command:
+        cmd: ansible-galaxy collection install -r {{ repo_root }}/requirements.yml kubernetes.core
+      delegate_to: localhost
+      become: false
+      run_once: true
+      when: di_k8s_auto_install_collection | default(true) | bool
+      changed_when: false
+      failed_when: false
+      tags: [always]
+
+  tasks:
+    - name: Build and push DI image
+      ansible.builtin.include_tasks:
+        file: "{{ repo_root }}/roles/di/tasks/kubernetes_image_build.yml"
+        apply:
+          tags: [di, di-k8s, di-k8s-build]
+      tags: [di, di-k8s, di-k8s-build]
+
+# ===========================================================================
+# Main DI deployment play (all three modes).
+# ===========================================================================
 
 - name: Deploy Hammerspace Data Instantiator (DI)
   hosts: di_nodes
@@ -57,8 +112,8 @@
     - name: Validate di_deployment_type
       ansible.builtin.assert:
         that:
-          - di_deployment_type in ['host', 'container']
-        fail_msg: "di_deployment_type must be 'host' or 'container' (got: '{{ di_deployment_type }}')"
+          - di_deployment_type in ['host', 'container', 'kubernetes']
+        fail_msg: "di_deployment_type must be 'host', 'container', or 'kubernetes' (got: '{{ di_deployment_type }}')"
       tags: [always]
 
     - name: Display selected DI deployment mode
@@ -66,7 +121,10 @@
         msg: >-
           DI deployment mode: {{ di_deployment_type }}{% if di_deployment_type == 'container' %}
           ({{ di_container_runtime }}, image={{ di_container_image }},
-          base={{ di_container_base_image }}){% endif %}
+          base={{ di_container_base_image }}){% elif di_deployment_type == 'kubernetes' %}
+          (namespace={{ di_k8s_namespace }},
+          image={{ di_k8s_registry }}/{{ di_k8s_registry_namespace }}/{{ di_k8s_image_repository }}:{{ di_k8s_image_tag }},
+          selector={{ di_k8s_node_selector_label }}={{ di_k8s_node_selector_value }}){% endif %}
       tags: [always]
 
     - name: Check if DI node already exists in Hammerspace
@@ -131,4 +189,30 @@
           Cluster: anvil> node-list --name {{ di_node_name | default(inventory_hostname) }}
           ============================================
       when: di_deployment_type == 'container'
+      tags: [always]
+
+    - name: DI deployment complete (kubernetes mode)
+      ansible.builtin.debug:
+        msg: |
+          ============================================
+          DI DEPLOYMENT COMPLETE (Kubernetes)
+          ============================================
+          Namespace: {{ di_k8s_namespace }}
+          DaemonSet: hammerspace-di
+          Image:     {{ di_k8s_registry }}/{{ di_k8s_registry_namespace }}/{{ di_k8s_image_repository }}:{{ di_k8s_image_tag }}
+          Selector:  {{ di_k8s_node_selector_label }}={{ di_k8s_node_selector_value }}
+          Status label: {{ di_k8s_status_label }} (ready|degraded|failed)
+
+          Verify pods:
+            kubectl -n {{ di_k8s_namespace }} get pods -o wide
+          Verify pd-di (logs alone won't show pd-di; image runs systemd):
+            kubectl -n {{ di_k8s_namespace }} exec ds/hammerspace-di -- journalctl -u pd-di -n 50
+          Inspect node labels:
+            kubectl get nodes -L {{ di_k8s_node_selector_label }},{{ di_k8s_status_label }}
+          Refresh status labels (no full re-deploy):
+            ansible-playbook plays/di.yml -e deploy_di=true --tags di-k8s-status
+          ============================================
+      run_once: true
+      delegate_to: localhost
+      when: di_deployment_type == 'kubernetes'
       tags: [always]

@@ -4,9 +4,14 @@
 # Orchestrates DI deployment on target nodes. Called from site.yml
 # when deploy_di is true (targets di_nodes group).
 #
-# Supports two modes:
-#   di_deployment_type: "host"      - Native RPM install
-#   di_deployment_type: "container" - Build & run in podman/docker
+# Supports three modes:
+#   di_deployment_type: "host"       - Native RPM install
+#   di_deployment_type: "container"  - Build & run in podman/docker
+#   di_deployment_type: "kubernetes" - Build/push image + apply DaemonSet to a
+#                                      k8s cluster (containerd CRI). Host-mode
+#                                      installs are skipped; host firewall +
+#                                      SELinux still apply because the pod uses
+#                                      hostNetwork + privileged.
 #
 # Activation control:
 #   di_activate: true  (default) - Install, start services, and register with cluster
@@ -144,6 +149,32 @@
     - di_deployment_type == 'container'
     - di_activate | default(true) | bool
   tags: [di, di-container, di-activate]
+
+# =============================================================================
+# Kubernetes-mode path. Build/push happens in plays/di.yml's first play
+# (against the di_k8s_build_hosts group); this branch handles the cluster
+# apply + status label.
+# =============================================================================
+
+- name: Deploy DI DaemonSet to Kubernetes
+  ansible.builtin.include_tasks:
+    file: kubernetes_deploy.yml
+    apply:
+      tags: [di, di-k8s, di-activate]
+  when:
+    - di_deployment_type == 'kubernetes'
+    - di_activate | default(true) | bool
+  tags: [di, di-k8s, di-activate]
+
+- name: Label nodes with DI service status
+  ansible.builtin.include_tasks:
+    file: kubernetes_status_label.yml
+    apply:
+      tags: [di, di-k8s, di-k8s-status, di-activate]
+  when:
+    - di_deployment_type == 'kubernetes'
+    - di_activate | default(true) | bool
+  tags: [di, di-k8s, di-k8s-status, di-activate]
 
 # =============================================================================
 # Pre-deploy summary (when di_activate is false)

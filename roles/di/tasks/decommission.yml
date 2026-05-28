@@ -1,6 +1,15 @@
 ---
 # DI Decommission role - Remove DI node from Hammerspace cluster
-# Steps: list volumes -> decommission volumes -> remove volumes -> remove node -> stop services
+# Steps: (k8s only) tear down DaemonSet/secrets/labels FIRST, then proceed
+#        with the API-side teardown shared across all modes.
+
+- name: Tear down Kubernetes DI deployment
+  ansible.builtin.include_tasks:
+    file: kubernetes_decommission.yml
+    apply:
+      tags: [di, di-k8s, di-decommission]
+  when: di_deployment_type | default('host') == 'kubernetes'
+  tags: [di, di-k8s, di-decommission]
 
 - name: Set DI node facts
   ansible.builtin.set_fact:
@@ -110,9 +119,12 @@
         _api_poll_delay: "{{ di_decommission_poll_delay | default(10) }}"
       when: _api_response.location | default('') | length > 0
 
-# Stop services
+# Stop services (host-mode and container-mode only — k8s pods are already
+# gone via kubernetes_decommission.yml, and there are no host services to stop).
 - name: Stop DI services
-  when: di_decommission_stop_services | default(true)
+  when:
+    - di_decommission_stop_services | default(true)
+    - di_deployment_type | default('host') != 'kubernetes'
   block:
     - name: Stop pd-di service
       ansible.builtin.systemd:
@@ -146,7 +158,9 @@
 # ==========================================================================
 
 - name: Clean up DI installation
-  when: di_decommission_cleanup | default(true)
+  when:
+    - di_decommission_cleanup | default(true)
+    - di_deployment_type | default('host') != 'kubernetes'
   block:
 
     # ---- Container cleanup (if container mode was used) --------------------

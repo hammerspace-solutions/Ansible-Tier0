@@ -205,6 +205,59 @@
             _test_failures: "{{ _test_failures + ['TEST 3: ' ~ (ansible_failed_result.msg | default('unknown'))] }}"
 
     # ========================================================================
+    # TEST 4: same propagation rule for the di-k8s tag — k8s deploy,
+    # status-label, and decommission must run as a unit under --tags di-k8s.
+    # ========================================================================
+    - name: 'TEST 4: every di-k8s include_tasks has apply: tags propagation'
+      block:
+        - name: Find include_tasks blocks tagged di-k8s but missing apply.tags di-k8s
+          ansible.builtin.shell:
+            executable: /bin/bash
+            cmd: |
+              set -uo pipefail
+              awk '
+                /^- name:/ {
+                    if (block != "") evaluate(block)
+                    block = $0 "\n"
+                    next
+                }
+                { block = block $0 "\n" }
+                END { if (block != "") evaluate(block) }
+
+                function evaluate(b,    has_include, has_k8s_tag, has_apply_k8s) {
+                    has_include = (b ~ /include_tasks:/)
+                    if (!has_include) return
+                    has_k8s_tag = (b ~ /tags:[^\n]*di-k8s/)
+                    if (!has_k8s_tag) return
+                    has_apply_k8s = (b ~ /apply:[[:space:]]*\n[[:space:]]+tags:[^\n]*di-k8s/)
+                    if (!has_apply_k8s) {
+                        match(b, /name:[[:space:]]*[^\n]+/)
+                        print substr(b, RSTART, RLENGTH)
+                    }
+                }
+              ' "{{ _di_main }}"
+          register: _bad_k8s_includes
+          changed_when: false
+
+        - name: 'TEST 4 ASSERT: zero di-k8s include_tasks missing apply.tags propagation'
+          ansible.builtin.assert:
+            that:
+              - (_bad_k8s_includes.stdout | length) == 0
+            fail_msg: |
+              These include_tasks blocks in roles/di/tasks/main.yml are
+              tagged `di-k8s` but lack `apply: tags:` propagation:
+
+              {{ _bad_k8s_includes.stdout }}
+
+              Add `apply: tags: [di, di-k8s, ...]` to each.
+
+        - ansible.builtin.set_fact:
+            _test_passes: "{{ _test_passes + ['TEST 4: every di-k8s include_tasks propagates tags via apply:'] }}"
+      rescue:
+        - ansible.builtin.set_fact:
+            _test_failures: "{{ _test_failures + ['TEST 4: ' ~ (ansible_failed_result.msg | default('unknown'))] }}"
+
+    # ========================================================================
     # Report
     # ========================================================================
     - name: Print test report

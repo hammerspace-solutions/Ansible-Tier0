@@ -84,6 +84,47 @@ Run directly:
 bash tests/integration/test_run_sh_locale.sh
 ```
 
+## `test_di_k8s_render.yml`
+
+Renders the four Kubernetes manifest templates under
+`roles/di/templates/` (namespace, image-pull secret, API-credentials
+secret, DaemonSet) with mock vars and asserts the structural shape
+required by the customer ask. No cluster, no kubeconfig.
+
+Test cases:
+
+| # | Scenario | Expected |
+|---|----------|----------|
+| 1 | `namespace.yaml.j2` | PSA enforce/audit/warn = `privileged` |
+| 2 | `image_pull_secret.yaml.j2` | type `kubernetes.io/dockerconfigjson`, base64 payload present |
+| 3 | `api_credentials_secret.yaml.j2` | `HAMMERSPACE_API_*` keys present, `DI_IGNORE_IP_CONFLICTS=true` |
+| 4 | `daemonset.yaml.j2` | hostNetwork, ClusterFirstWithHostNet, nodeSelector, tolerations include `nvidia.com/gpu`, priorityClassName, hostAliases, initContainer `register-node`, privileged + SYS_ADMIN/NET_ADMIN/SYS_PTRACE, ports 9095+9096 with `hostPort`, cgroup+modules hostPath, run+tmp emptyDir Memory, and **the API password is NOT in the rendered file** (only referenced via Secret envFrom) |
+
+## `test_di_k8s_validation.yml`
+
+Static-grep validation that the k8s wiring is in place across:
+
+| # | Scenario | Expected |
+|---|----------|----------|
+| 1 | `plays/di.yml` validator | accepts `'host', 'container', 'kubernetes'` |
+| 2 | `container_runtime.yml` | accepts `containerd` as a passthrough (short-circuits via `end_host`) |
+| 3 | `roles/di/tasks/main.yml` | k8s mode routes to `kubernetes_deploy.yml` + `kubernetes_status_label.yml`, tagged `di-k8s` + `di-k8s-status` |
+| 4 | `decommission.yml` | dispatches `kubernetes_decommission.yml` when k8s mode is selected |
+
+## `test_di_activate_tag.yml`
+
+Tag-propagation regression (Peter's 2026-05-21 report) + extended for the
+new `di-k8s` tag (2026-05-26).
+
+Test cases:
+
+| # | Scenario | Expected |
+|---|----------|----------|
+| 1 | Every `di-activate`-tagged `include_tasks` in `roles/di/tasks/main.yml` carries `apply: tags:` propagation | Pass |
+| 2 | Every pre_task / post_task in `plays/di.yml` is tagged `[always]` | Pass |
+| 3 | `ansible-playbook --list-tasks --tags di-activate site.yml` lists at least one activation task | Pass |
+| 4 | Same propagation rule for the `di-k8s` tag | Pass |
+
 ## `test_raid_idempotency.yml`
 
 Regression test for the 2026-05-15 EBUSY-on-re-run incident (Peter's bug),

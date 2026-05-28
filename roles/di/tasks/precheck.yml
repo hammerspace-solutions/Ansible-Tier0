@@ -168,3 +168,47 @@
   ansible.builtin.debug:
     msg: "pd-di service: {{ pddi_service.status.ActiveState | default('not found') }}"
   when: pddi_service.status is defined
+
+# -------------------------------------------------------------------------
+# Kubernetes-mode precheck (controller-side).
+# Validates kubeconfig is readable, kubectl is on PATH, and the operator
+# has namespace-create rights.
+# -------------------------------------------------------------------------
+
+- name: Kubernetes precheck
+  when: di_deployment_type | default('host') == 'kubernetes'
+  delegate_to: localhost
+  become: false
+  run_once: true
+  block:
+    - name: Check kubeconfig exists
+      ansible.builtin.stat:
+        path: "{{ di_k8s_kubeconfig }}"
+      register: _di_k8s_kubeconfig_stat
+
+    - name: Fail if kubeconfig missing
+      ansible.builtin.fail:
+        msg: "Kubeconfig not found at {{ di_k8s_kubeconfig }}. Set di_k8s_kubeconfig or KUBECONFIG env."
+      when: not _di_k8s_kubeconfig_stat.stat.exists
+
+    - name: Probe kubectl
+      ansible.builtin.command:
+        cmd: kubectl --kubeconfig {{ di_k8s_kubeconfig }} version --client=true -o json
+      register: _di_k8s_kubectl_probe
+      changed_when: false
+      failed_when: _di_k8s_kubectl_probe.rc != 0
+
+    - name: Probe namespace-create permission
+      ansible.builtin.command:
+        cmd: kubectl --kubeconfig {{ di_k8s_kubeconfig }} auth can-i create namespaces
+      register: _di_k8s_perm_probe
+      changed_when: false
+      failed_when: false
+
+    - name: Warn if namespace-create permission denied
+      ansible.builtin.debug:
+        msg: >-
+          WARNING: kubectl auth can-i create namespaces returned
+          '{{ _di_k8s_perm_probe.stdout | trim }}'. Namespace must already exist
+          OR your kubeconfig needs broader rights.
+      when: (_di_k8s_perm_probe.stdout | trim) != 'yes'

@@ -944,7 +944,92 @@ The decommission playbook:
 1. Evacuates data from volumes (configurable via `di_decommission_evacuate_data`)
 2. Deletes volumes from Hammerspace
 3. Removes the node from the cluster
-4. Stops pd-di services on the host
+4. Stops pd-di services on the host (skipped in k8s mode)
+
+In k8s mode the decommission also (BEFORE the API teardown):
+- Removes the `hammerspace.io/di-status` + `hammerspace.io/di` labels from
+  each target node (this evicts the DaemonSet pods).
+- Deletes the `hammerspace-di` DaemonSet, the API-credentials Secret, and
+  the image-pull Secret.
+- Optionally deletes the namespace
+  (`di_k8s_decommission_delete_namespace: true`).
+
+### 11.6 Kubernetes / containerd Mode
+
+For sites running a Kubernetes cluster on bare-metal (e.g., OCI BM GPU
+shapes) where the CRI is containerd and DI must run as a DaemonSet rather
+than as a host service or local container.
+
+**Cluster prerequisites:**
+- Kubernetes ≥ 1.24 with containerd, `SystemdCgroup = true`.
+- Kubeconfig on the Ansible controller with rights to: create namespaces,
+  label nodes, create Secrets + DaemonSets in `di_k8s_namespace`.
+- Inventory group `di_k8s_build_hosts` populated with one host per target
+  arch (typically one x86_64, optionally one aarch64). Each build host has
+  one of `podman`, `docker`, `buildah`, or `nerdctl` installed.
+- Registry the cluster can pull from (default config assumes OCIR). Store
+  credentials in `vars/vault.yml`.
+
+**Required variables in `vars/main.yml`:**
+
+```yaml
+deploy_di: true
+di_deployment_type: "kubernetes"
+di_k8s_registry_namespace: "<your-oci-tenancy-namespace>"
+
+# Land DI on tainted GPU nodes:
+di_k8s_tolerations:
+  - {key: "nvidia.com/gpu", operator: "Exists", effect: "NoSchedule"}
+
+# Survive eviction under GPU workload pressure:
+di_k8s_priority_class: "system-node-critical"
+```
+
+**Required vault values (`vars/vault.yml`):**
+
+```yaml
+di_k8s_registry_username: "<tenancy>/oracleidentitycloudservice/<user>"
+di_k8s_registry_password: "<oci-auth-token>"
+```
+
+**Single-command deploy** (build → push → label → namespace → secrets → DaemonSet → register → status label):
+
+```bash
+ansible-playbook site.yml -i inventory.yml -e deploy_di=true
+```
+
+The playbook runs two plays back-to-back:
+
+1. **Build play** against the `di_k8s_build_hosts` group. Each build host
+   auto-detects which build tool is installed, stages the payload from the
+   controller's `payload/` (git-lfs pulled automatically), builds an image
+   tagged `<registry>/<ns>/hammerspace-di:<ver>-<amd64|arm64>`, and pushes.
+2. **Deploy play** against the `di_nodes` group, but with all k8s-API tasks
+   delegated to the controller (`run_once: true, delegate_to: localhost`).
+   Labels nodes, creates the namespace with PodSecurityAdmission =
+   `privileged`, creates the registry pull-secret + API-credentials Secret,
+   renders + applies the DaemonSet, and waits for rollout. Then the status
+   label task sets `hammerspace.io/di-status` per node.
+
+**Refresh status labels later** without a full re-deploy:
+
+```bash
+ansible-playbook plays/di.yml -e deploy_di=true --tags di-k8s-status
+```
+
+**Verification:**
+
+```bash
+# Per-node tags (the customer-visible labels)
+kubectl get nodes -L hammerspace.io/di,hammerspace.io/di-status
+
+# Pod surface
+kubectl -n hammerspace-di get pods -o wide
+
+# pd-di health — `kubectl logs` alone won't show pd-di because the image
+# runs systemd as PID 1. Use journalctl inside the pod:
+kubectl -n hammerspace-di exec ds/hammerspace-di -- journalctl -u pd-di -n 100
+```
 
 ---
 

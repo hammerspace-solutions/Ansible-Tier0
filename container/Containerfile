@@ -44,8 +44,15 @@ RUN ARCH=$(uname -m) && \
     else echo "WARNING: No RPMs found for arch ${ARCH}"; fi
 
 # add_node.py may or may not be in the tarball; role ensures it ends up in payload.
+# Bake the ignoreIpConflicts patch in at build time so co-located Tier 0 + DI
+# registration doesn't need a runtime sed (previously done by the role).
+ARG DI_IGNORE_IP_CONFLICTS=true
 RUN if [ -f /opt/payload/add_node.py ]; then \
         install -m 0755 /opt/payload/add_node.py /usr/local/bin/add_node.py ; \
+        if [ "${DI_IGNORE_IP_CONFLICTS}" = "true" ]; then \
+            sed -i "/def post/,/def [a-z]/s|endpoint='nodes'|endpoint='nodes?ignoreIpConflicts=true'|" \
+                /usr/local/bin/add_node.py ; \
+        fi ; \
     fi
 
 # Enable the lttng side-services so they're up when pd-di starts.
