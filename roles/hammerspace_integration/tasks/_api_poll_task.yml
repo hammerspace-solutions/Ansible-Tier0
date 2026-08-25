@@ -22,7 +22,7 @@
     cmd: >-
       curl -s --max-time {{ hammerspace_api_curl_timeout | default(60) }}
       {{ '' if (hammerspace_api_validate_certs | default(false)) else '-k' }}
-      -u "{{ hammerspace_api_user }}:{{ hammerspace_api_password }}"
+      -H "Authorization: Basic {{ (hammerspace_api_user ~ ':' ~ hammerspace_api_password) | b64encode }}"
       "{{ _api_poll_url }}"
   register: _api_poll_curl_raw
   changed_when: false

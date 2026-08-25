@@ -132,7 +132,7 @@
         cmd: >-
           curl -s -o /dev/stdout -w "\n%{http_code}" --max-time 30
           {{ '' if (hammerspace_api_validate_certs | default(false)) else '-k' }}
-          -u "{{ hammerspace_api_user }}:{{ hammerspace_api_password }}"
+          -H "Authorization: Basic {{ (hammerspace_api_user ~ ':' ~ hammerspace_api_password) | b64encode }}"
           "https://{{ hammerspace_api_host }}:{{ hammerspace_api_port | default(8443) }}/mgmt/v1.2/rest/nodes/{{ di_node_name | default(inventory_hostname) | urlencode }}"
       register: hs_di_precheck_raw
       changed_when: false

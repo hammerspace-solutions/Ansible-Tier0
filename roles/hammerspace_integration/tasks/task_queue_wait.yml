@@ -8,7 +8,7 @@
     cmd: >-
       curl -s --max-time 60
       {{ '' if (hammerspace_api_validate_certs | default(false)) else '-k' }}
-      -u "{{ hammerspace_api_user }}:{{ hammerspace_api_password }}"
+      -H "Authorization: Basic {{ (hammerspace_api_user ~ ':' ~ hammerspace_api_password) | b64encode }}"
       "{{ hs_api_url }}/tasks?spec=status%3Deq%3DQUEUED"
   register: queued_tasks_raw
   changed_when: false
@@ -30,7 +30,7 @@
     cmd: >-
       curl -s --max-time 60
       {{ '' if (hammerspace_api_validate_certs | default(false)) else '-k' }}
-      -u "{{ hammerspace_api_user }}:{{ hammerspace_api_password }}"
+      -H "Authorization: Basic {{ (hammerspace_api_user ~ ':' ~ hammerspace_api_password) | b64encode }}"
       "{{ hs_api_url }}/tasks?spec=status%3Deq%3DQUEUED"
   register: task_queue_check_raw
   changed_when: false
@@ -48,7 +48,7 @@
     cmd: >-
       curl -s --max-time 60
       {{ '' if (hammerspace_api_validate_certs | default(false)) else '-k' }}
-      -u "{{ hammerspace_api_user }}:{{ hammerspace_api_password }}"
+      -H "Authorization: Basic {{ (hammerspace_api_user ~ ':' ~ hammerspace_api_password) | b64encode }}"
       "{{ hs_api_url }}/tasks?spec=status%3Deq%3DEXECUTING"
   register: executing_tasks_raw
   changed_when: false
@@ -67,7 +67,7 @@
     cmd: >-
       curl -s --max-time 60
       {{ '' if (hammerspace_api_validate_certs | default(false)) else '-k' }}
-      -u "{{ hammerspace_api_user }}:{{ hammerspace_api_password }}"
+      -H "Authorization: Basic {{ (hammerspace_api_user ~ ':' ~ hammerspace_api_password) | b64encode }}"
       "{{ hs_api_url }}/tasks?spec=status%3Deq%3DEXECUTING"
   register: executing_check_raw
   changed_when: false

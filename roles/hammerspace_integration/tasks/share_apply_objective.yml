@@ -18,7 +18,7 @@
     cmd: >-
       curl -s -o /dev/stdout -w "\n%{http_code}" --max-time {{ hammerspace_api_curl_timeout | default(180) }}
       {{ '' if (hammerspace_api_validate_certs | default(false)) else '-k' }}
-      -u "{{ hammerspace_api_user }}:{{ hammerspace_api_password }}"
+      -H "Authorization: Basic {{ (hammerspace_api_user ~ ':' ~ hammerspace_api_password) | b64encode }}"
       -X POST -H "Content-Type: application/json"
       -D /tmp/hs_objective_{{ _objective_hash }}_headers.txt
       -d ''
@@ -47,7 +47,7 @@
     cmd: >-
       curl -s --max-time {{ hammerspace_api_curl_timeout | default(60) }}
       {{ '' if (hammerspace_api_validate_certs | default(false)) else '-k' }}
-      -u "{{ hammerspace_api_user }}:{{ hammerspace_api_password }}"
+      -H "Authorization: Basic {{ (hammerspace_api_user ~ ':' ~ hammerspace_api_password) | b64encode }}"
       "{{ objective_apply_result.location }}"
   register: objective_status_raw
   changed_when: false

@@ -8,7 +8,7 @@
     cmd: >-
       curl -s -o /dev/stdout -w "\n%{http_code}" --max-time {{ hammerspace_api_curl_timeout | default(60) }}
       {{ '' if (hammerspace_api_validate_certs | default(false)) else '-k' }}
-      -u "{{ hammerspace_api_user }}:{{ hammerspace_api_password }}"
+      -H "Authorization: Basic {{ (hammerspace_api_user ~ ':' ~ hammerspace_api_password) | b64encode }}"
       "{{ hs_api_url }}/sites/local"
   register: current_site_raw
   changed_when: false
@@ -35,7 +35,7 @@
     cmd: >-
       curl -s -o /dev/stdout -w "\n%{http_code}" --max-time {{ hammerspace_api_curl_timeout | default(180) }}
       {{ '' if (hammerspace_api_validate_certs | default(false)) else '-k' }}
-      -u "{{ hammerspace_api_user }}:{{ hammerspace_api_password }}"
+      -H "Authorization: Basic {{ (hammerspace_api_user ~ ':' ~ hammerspace_api_password) | b64encode }}"
       -X PUT -H "Content-Type: application/json"
       -D /tmp/hs_site_update_headers.txt
       -d '{{ site_combined_payload | to_json }}'
@@ -69,7 +69,7 @@
     cmd: >-
       curl -s --max-time {{ hammerspace_api_curl_timeout | default(60) }}
       {{ '' if (hammerspace_api_validate_certs | default(false)) else '-k' }}
-      -u "{{ hammerspace_api_user }}:{{ hammerspace_api_password }}"
+      -H "Authorization: Basic {{ (hammerspace_api_user ~ ':' ~ hammerspace_api_password) | b64encode }}"
       "{{ site_update_result.location }}"
   register: site_update_status_raw
   changed_when: false

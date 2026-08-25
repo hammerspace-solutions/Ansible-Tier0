@@ -29,7 +29,7 @@
     cmd: >-
       curl -s -o /dev/stdout -w "\n%{http_code}" --max-time {{ hammerspace_api_curl_timeout | default(60) }}
       {{ '' if (hammerspace_api_validate_certs | default(false)) else '-k' }}
-      -u "{{ hammerspace_api_user }}:{{ hammerspace_api_password }}"
+      -H "Authorization: Basic {{ (hammerspace_api_user ~ ':' ~ hammerspace_api_password) | b64encode }}"
       "{{ hs_api_url }}/object-storage-volumes/{{ object_volume_payload.name | urlencode }}"
   register: object_volume_check_raw
   changed_when: false
@@ -47,7 +47,7 @@
     cmd: >-
       curl -s -o /dev/stdout -w "\n%{http_code}" --max-time {{ hammerspace_api_curl_timeout | default(180) }}
       {{ '' if (hammerspace_api_validate_certs | default(false)) else '-k' }}
-      -u "{{ hammerspace_api_user }}:{{ hammerspace_api_password }}"
+      -H "Authorization: Basic {{ (hammerspace_api_user ~ ':' ~ hammerspace_api_password) | b64encode }}"
       -X POST -H "Content-Type: application/json"
       -D /tmp/hs_object_volume_add_headers.txt
       -d '{{ object_volume_payload | to_json }}'
@@ -82,7 +82,7 @@
     cmd: >-
       curl -s --max-time {{ hammerspace_api_curl_timeout | default(60) }}
       {{ '' if (hammerspace_api_validate_certs | default(false)) else '-k' }}
-      -u "{{ hammerspace_api_user }}:{{ hammerspace_api_password }}"
+      -H "Authorization: Basic {{ (hammerspace_api_user ~ ':' ~ hammerspace_api_password) | b64encode }}"
       "{{ object_volume_add_result.location }}"
   register: object_volume_add_status_raw
   changed_when: false

@@ -32,7 +32,7 @@
     cmd: >-
       curl -s -o /dev/stdout -w "\n%{http_code}" --max-time {{ _api_req_timeout }}
       {{ '' if (hammerspace_api_validate_certs | default(false)) else '-k' }}
-      -u "{{ hammerspace_api_user }}:{{ hammerspace_api_password }}"
+      -H "Authorization: Basic {{ (hammerspace_api_user ~ ':' ~ hammerspace_api_password) | b64encode }}"
       {% if _api_request_method != 'GET' %}-X {{ _api_request_method }} -H "Content-Type: application/json"{% endif %}
       {% if _api_req_save_headers | bool %}-D {{ _api_req_header_file }}{% endif %}
       {% if _api_request_body is defined %}-d '{{ _api_request_body | to_json }}'{% endif %}

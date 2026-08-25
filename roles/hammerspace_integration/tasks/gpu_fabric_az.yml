@@ -56,7 +56,7 @@
     cmd: >-
       curl -s --max-time 30
       {{ '' if (hammerspace_api_validate_certs | default(false)) else '-k' }}
-      -u "{{ hammerspace_api_user }}:{{ hammerspace_api_password }}"
+      -H "Authorization: Basic {{ (hammerspace_api_user ~ ':' ~ hammerspace_api_password) | b64encode }}"
       "{{ hs_api_url }}/storage-volumes"
   register: _hs_volumes_raw
   changed_when: false
