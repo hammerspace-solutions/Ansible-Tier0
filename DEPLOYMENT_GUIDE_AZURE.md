@@ -231,7 +231,7 @@ Edit `inventory.azure.yml`. At minimum, set the resource group and confirm the
 ```yaml
 plugin: azure.azcollection.azure_rm
 
-# REQUIRED: which resource group(s) hold the Tier 0 VMs.
+# REQUIRED: which resource group(s) hold the Tier 0 VMs — see 4.3 to find it.
 # Remove this key entirely to scan the whole subscription (much slower).
 include_vm_resource_groups:
   - tier0-rg
@@ -253,10 +253,11 @@ hostvar_expressions:
   azure_location: location | default(None)
   azure_resource_group: resource_group | default(None)
 
-# Everything discovered lands in storage_servers, which the plays target.
-# Tighten this if the resource group holds more than Tier 0 nodes.
+# Which VMs become storage_servers — see 4.4.
 conditional_groups:
-  storage_servers: "'tier0' in name"
+  storage_servers: >-
+    virtual_machine_size is defined and
+    virtual_machine_size in ['Standard_L16s_v3', 'Standard_L32s_v3']
 
 keyed_groups:
   - key: availability_zone
@@ -266,23 +267,124 @@ keyed_groups:
     prefix: size
   - key: location
     prefix: loc
+
+# conditional_groups expressions fail SILENTLY by default. Set true to debug.
+strict: false
 ```
 
-**If your VMs are not named `tier0*`,** change the `conditional_groups`
-expression. Grouping on a tag is usually more durable than on the name:
+### 4.3 Finding Your Resource Group
+
+`include_vm_resource_groups` is the one value you cannot guess. To find it:
+
+```bash
+# Which subscriptions can you see?
+az account list -o table
+az account set --subscription <id>
+
+# Every VM with its resource group. No -d: resourceGroup is in the basic
+# payload and --show-details is dramatically slower on large subscriptions.
+az vm list --query "[].{name:name, rg:resourceGroup, size:hardwareProfile.vmSize}" -o table
+
+# Just the distinct resource groups that contain VMs
+az vm list --query "[].resourceGroup" -o tsv | sort -u
+```
+
+Narrow it if you already know something about the nodes:
+
+```bash
+# By name fragment
+az vm list --query "[?contains(name,'tier0')].{name:name, rg:resourceGroup}" -o table
+
+# By tag
+az vm list --query "[?tags.role=='tier0'].{name:name, rg:resourceGroup}" -o table
+
+# By a private IP you already have (from the Anvil, or an existing export)
+az network nic list \
+  --query "[?ipConfigurations[0].privateIPAddress=='10.0.14.101'].{nic:name, rg:resourceGroup}" -o table
+```
+
+Then choose the scope:
+
+| Situation | Setting |
+|-----------|---------|
+| All Tier 0 VMs in one resource group | List that one. Fastest, narrowest permissions. |
+| Spread across a few groups | List them all. |
+| Spread unpredictably, or you don't control placement | Delete the key and rely on `conditional_groups`. Scans the whole subscription — slow, and needs `Reader` at **subscription** scope rather than resource-group scope. |
+| VMs live in a scale set | Use `include_vmss_resource_groups` — `include_vm_resource_groups` will not find them. |
+
+**The two filters do different jobs**, and conflating them is the usual cause
+of an empty inventory:
+
+- `include_vm_resource_groups` — what is **fetched from Azure**. A cost and
+  permissions boundary. Set it too narrow and no `conditional_groups`
+  expression can recover the missing hosts.
+- `conditional_groups` — what, of the fetched set, lands in the group the plays
+  target. Too broad here costs only API time; the group filter still applies.
+
+### 4.4 Choosing the storage_servers Filter
+
+> **This filter is destructive if it is too broad.** Whatever lands in
+> `storage_servers` gets its disks discovered, RAIDed and mkfs'd. A VM that
+> matches by accident loses its data. Always confirm with
+> `ansible-inventory -i inventory.azure.yml --graph` before the first run
+> against a new environment.
+
+In Azure, "size" and "SKU" are the same thing — `Standard_L16s_v3` — exposed to
+the inventory as `virtual_machine_size`. Three ways to use it, in increasing
+order of breadth:
+
+**Option 1 — exact sizes (default, tightest).** Tier 0 fleets are normally
+homogeneous, so an explicit list is precise and self-documenting:
 
 ```yaml
 conditional_groups:
-  storage_servers: "tags.role | default('') == 'tier0'"
+  storage_servers: >-
+    virtual_machine_size is defined and
+    virtual_machine_size in ['Standard_L16s_v3', 'Standard_L32s_v3']
 ```
 
-Then tag the VMs once:
+**Option 2 — whole SKU family.** Survives adding a node of a different size in
+the same family, at the cost of sweeping in any same-family VM in the resource
+group. Matches storage-optimized L-family (Lsv2/Lsv3/Lasv3/Lsv4) and the NC/ND
+GPU families:
+
+```yaml
+conditional_groups:
+  storage_servers: >-
+    virtual_machine_size is defined and
+    virtual_machine_size | regex_search('^Standard_(L[0-9]+a?s_v[0-9]+|N[CD][0-9]+)')
+```
+
+Verified against `Standard_L{8,16,80}s_v{2,3,4}`, `Standard_L{8,16}as_v3`,
+`Standard_NC{6s_v3,24ads_A100_v4,40ads_H100_v5}`, `Standard_ND96{asr_v4,isr_H100_v5}`;
+correctly rejects the D, E, F, B and M families.
+
+**Option 3 — tag, optionally AND-ed with the SKU (safest).** Expresses intent
+explicitly rather than inferring it from hardware, so a same-SKU VM added for
+some other purpose cannot join:
 
 ```bash
-az vm update -g tier0-rg -n <vm-name> --set tags.role=tier0
+az vm update -g <rg> -n <vm-name> --set tags.role=tier0
 ```
 
-### 4.3 Test Inventory Discovery
+```yaml
+conditional_groups:
+  storage_servers: >-
+    tags.role | default('') == 'tier0' and
+    virtual_machine_size | default('') | regex_search('^Standard_L')
+```
+
+**Why not match on the name?** A name fragment like `'tier0' in name` breaks
+the moment someone renames a VM or spins one up off-convention, and it fails
+*open* in the dangerous direction — a test VM named `tier0-scratch` would be
+swept in and wiped.
+
+**Debugging:** `conditional_groups` expressions fail **silently** — a typo
+drops hosts with no error and `storage_servers` simply comes back empty. Set
+`strict: true` in the inventory to turn those into hard errors while you are
+getting the expression right.
+
+### 4.5 Test Inventory Discovery
 
 ```bash
 # List all discovered hosts
@@ -311,6 +413,14 @@ ansible -i inventory.azure.yml storage_servers -m ping
 > (`cache_connection: /tmp/ansible_azure_inventory_cache`). After creating or
 > destroying VMs, either wait it out or clear the cache:
 > `rm -rf /tmp/ansible_azure_inventory_cache`.
+
+**Reading an empty result:**
+
+| Symptom | Cause |
+|---------|-------|
+| Hosts under `@all`, but `storage_servers` empty | Resource group is right; the `conditional_groups` expression is wrong. Set `strict: true` and re-run to see the error. |
+| `@all` empty too | Resource group, subscription or auth scope is wrong — or every VM was dropped by `exclude_host_filters` (not running / not succeeded). |
+| Hosts appear but with no `azure_zone` | Expected on non-zonal VMs. See [section 10](#10-availability-zone-az-configuration-on-azure). |
 
 ---
 
@@ -1017,6 +1127,44 @@ ansible -i inventory.azure.yml storage_servers -m shell \
 # Local NVMe as nvme*n1  -> storage_type: nvme
 # Data disks as sdc, sdd -> storage_type: ssd
 ```
+
+### "Hammerspace API configuration missing" from preflight_check.yml
+
+**Problem:** `ansible-playbook preflight_check.yml -i inventory.azure.yml`
+fails immediately with `assertion: hammerspace_api_password is defined` /
+`evaluated_to: false`, telling you to set values in `vars/main.yml` that are
+already set.
+
+The inventory is irrelevant here — the failing play is `hosts: localhost`, so
+it fails the same way with any `-i`. The cause is the password coming from
+`vars/vault.yml`: `vars/main.yml` maps it as
+
+```yaml
+hammerspace_api_password: "{{ vault_hammerspace_api_password }}"
+```
+
+so if the vault file is not loaded, the key exists but its value references an
+undefined variable, and `is defined` evaluates false.
+
+**Fixed in the repo** — `preflight_check.yml` now loads the vault in
+`pre_tasks`. If you still see it, check in order:
+
+```bash
+# 1. Does the vault file define the variable — uncommented?
+grep -n "vault_hammerspace_api_password" vars/vault.yml
+#    A fresh checkout ships it COMMENTED OUT as an example:
+#      # vault_hammerspace_api_password: "PASSWORD"
+
+# 2. If encrypted, pass the password
+ansible-playbook preflight_check.yml -i inventory.azure.yml --ask-vault-pass
+
+# 3. Or bypass the vault entirely for a one-off
+ansible-playbook preflight_check.yml -i inventory.azure.yml \
+    -e hammerspace_api_password='...'
+```
+
+Regression test: `tests/integration/test_vault_loading.yml`, which audits every
+playbook in the repo for this.
 
 See [DEPLOYMENT_GUIDE.md § 12](DEPLOYMENT_GUIDE.md#12-troubleshooting) for the
 cloud-agnostic failures — locale errors, `Device or resource busy` on re-run,

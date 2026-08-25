@@ -60,21 +60,71 @@ hostvar_expressions:
   azure_location: location | default(None)
   azure_resource_group: resource_group | default(None)
 
-# Put every discovered VM into the storage_servers group the plays target.
-# Tighten the expression (e.g. on a tag) if the resource group holds more
-# than Tier 0 nodes.
+# Which discovered VMs become storage_servers — the group the plays target.
+#
+# NOTE the two filters do different jobs and are easy to conflate:
+#   include_vm_resource_groups  -> what is FETCHED from Azure (cost/permission
+#                                  boundary; too narrow and no expression here
+#                                  can recover the missing hosts)
+#   conditional_groups          -> what of the fetched set lands in the group
+#
+# SAFETY: whatever lands in storage_servers gets its disks discovered, RAIDed
+# and mkfs'd. A filter that is too broad is DESTRUCTIVE, not just noisy — an
+# unrelated VM that happens to match joins the group and loses its data. Prefer
+# the narrowest expression that covers the fleet, and confirm with
+# `ansible-inventory -i inventory.azure.yml --graph` before every first run
+# against a new environment.
+#
+# Option 1 (DEFAULT — tightest): exact VM sizes. Tier 0 fleets are normally
+# homogeneous, so an explicit list is both precise and self-documenting.
+# `virtual_machine_size` is the SKU/size string, e.g. "Standard_L16s_v3".
 conditional_groups:
-  storage_servers: "'tier0' in name"
+  storage_servers: >-
+    virtual_machine_size is defined and
+    virtual_machine_size in ['Standard_L16s_v3', 'Standard_L32s_v3']
+
+# Option 2: whole SKU FAMILY — survives adding a node of a different size in
+# the same family, at the cost of sweeping in any same-family VM in the
+# resource group. Matches the storage-optimized L-family (Lsv2/Lsv3/Lasv3/
+# Lsv4 — local NVMe) and the NC/ND GPU families.
+#   storage_servers: >-
+#     virtual_machine_size is defined and
+#     virtual_machine_size | regex_search('^Standard_(L[0-9]+a?s_v[0-9]+|N[CD][0-9]+)')
+#
+# Option 3 (SAFEST): explicit intent via a tag, optionally AND-ed with the SKU
+# so a mistagged VM of the wrong size still cannot join.
+#   az vm update -g <rg> -n <vm> --set tags.role=tier0
+#   storage_servers: >-
+#     tags.role | default('') == 'tier0' and
+#     virtual_machine_size | default('') | regex_search('^Standard_L')
+
+# conditional_groups expressions fail SILENTLY by default — a typo drops hosts
+# with no error, and storage_servers just comes back empty. Set strict: true
+# while debugging to turn those into hard errors.
+strict: false
 
 # Group by zone (az1, az2, ...) so on-prem-style AZ group names still work as
 # a fallback AZ source, and by VM size for targeted --limit runs.
+#
+# EVERY key is wrapped in `| default('<fallback>', true)`. A keyed_groups key
+# that evaluates to null or "" aborts the host with
+#   "No key or key resulted empty for <key> in host <name>, invalid entry"
+# on ansible-core <= 2.14 (newer cores skip the host silently instead — so this
+# breaks on an OLD controller while looking fine on a new one). Non-zonal Azure
+# VMs — availability sets, CycleCloud/HPC deployments, regions without zone
+# support — report availability_zone as null, which is the common case, not an
+# edge case. The `true` second argument is required: it makes `default` fire on
+# falsy values (null, "") rather than only on undefined.
+#
+# Non-zonal hosts land in `aznone`. That group is informational only; AZ
+# derivation for them comes from IMDS via hammerspace_azure_imds_az.
 keyed_groups:
-  - key: availability_zone
+  - key: availability_zone | default('none', true)
     prefix: az
     separator: ''
-  - key: virtual_machine_size
+  - key: virtual_machine_size | default('unknown', true)
     prefix: size
-  - key: location
+  - key: location | default('unknown', true)
     prefix: loc
 
 # Cache the API results - Azure inventory calls are slow on large subscriptions.

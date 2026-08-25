@@ -649,7 +649,7 @@ export AZURE_TENANT='...'
 **3. Edit `inventory.azure.yml`:**
 
 Set `include_vm_resource_groups` to the resource group(s) holding the Tier 0
-VMs, and make sure `conditional_groups.storage_servers` matches your naming:
+VMs, and set `conditional_groups.storage_servers` to select them by VM size:
 
 ```yaml
 plugin: azure.azcollection.azure_rm
@@ -661,8 +661,16 @@ plain_host_names: true
 auth_source: auto
 
 conditional_groups:
-  storage_servers: "'tier0' in name"
+  storage_servers: >-
+    virtual_machine_size is defined and
+    virtual_machine_size in ['Standard_L16s_v3', 'Standard_L32s_v3']
 ```
+
+> **This filter is destructive if too broad** — whatever lands in
+> `storage_servers` gets its disks RAIDed and mkfs'd. Verify with
+> `ansible-inventory -i inventory.azure.yml --graph` before the first run.
+> `DEPLOYMENT_GUIDE_AZURE.md` §4.3–4.4 cover finding your resource group and
+> the three filter options (exact sizes / SKU family / tag).
 
 > **Naming matters:** the plugin is only recognised for files ending in
 > `azure_rm.yml` or `azure.yml`. `inventory.azure.yml` satisfies the second

@@ -104,6 +104,47 @@ plain `| default('')` does not catch `None`, and `None | trim` stringifies to
 the literal `"None"` — which would become the AZ label. Every consumption site
 must use `| default('', true) | trim`.
 
+## `test_vault_loading.yml`
+
+Regression test for the vault-loading failure mode, hit 2026-08-25 on an Azure
+CycleCloud controller running `preflight_check.yml`.
+
+`vars/main.yml` maps the password to the vault variable:
+
+```yaml
+hammerspace_api_password: "{{ vault_hammerspace_api_password }}"
+```
+
+So loading `vars/main.yml` alone leaves the key present but its **value**
+referencing an undefined var — and `hammerspace_api_password is defined`
+evaluates **false**. The resulting error tells you to fix `vars/main.yml`,
+which is the one file that is not at fault. `preflight_check.yml` loaded
+`vars/main.yml` via `vars_files` but never included `vars/vault.yml`; every
+other API-touching playbook already did.
+
+Same class as the 2026-05-15 incident, where the `plays/` split broke
+`{{ playbook_dir }}/vars/vault.yml` resolution and the password went silently
+undefined.
+
+Test cases:
+
+| # | Scenario | Expected |
+|---|----------|----------|
+| 1 | A var whose value references an undefined var | `is defined` is **false**; true once the vault var exists (root cause) |
+| 2 | `vars/main.yml` still maps password → vault var | Present — the premise the audit rests on |
+| 3 | **Audit:** every playbook loading `vars/main.yml` + using API creds | All also load `vars/vault.yml` |
+| 4 | `preflight_check.yml` specifically | Loads the vault via `repo_root`, with `failed_when: false` |
+
+TEST 3 is the regression-prevention case: a new playbook that talks to the API
+without loading the vault fails here rather than in front of a customer.
+
+**Gotcha this test encodes:** the audit requires `vault.yml` to appear near an
+`include_vars` / `vars_files` key, not merely somewhere in the file. A bare
+`'vault.yml' in text` check is a false negative — `preflight_check.yml` now
+mentions `vault.yml` in its own fail_msg, and that alone was enough to make a
+naive audit pass while the include was absent. Found by negative-testing this
+test; TEST 4 caught the reverted fix and TEST 3 did not.
+
 ## `test_run_sh_locale.sh`
 
 Unit tests for `scripts/run.sh`. Pure bash, no Ansible required. Two sections:
@@ -285,6 +326,8 @@ Test cases:
 - After adding a cloud provider, an inventory plugin, or a new entry to the
   `SYSTEM_MOUNTS` allow-list in
   `roles/nvme_discovery/tasks/detect_boot_device.yml`
+- After adding any playbook that talks to the Hammerspace API — it must load
+  `vars/vault.yml` via `{{ repo_root }}` or the password is silently undefined
 
 Wire into pre-merge CI as `./tests/run_all.sh` — it runs every check in one
 command and exits non-zero on any failure.
