@@ -57,6 +57,52 @@ Test cases:
 | 3 | Boot disk somehow leaks into candidate list | Safety gate in `build_raid_arrays.yml` still fires (no regression of boot protection) |
 | 4 | End-to-end: discovery + `raid_setup._device_remap` | `mount_points[0].device` correctly remapped from `/dev/md0` to `/dev/md127` |
 | 5 | `/dev/md127` mounted at `/hammerspace/hsvol0` (2026-05-20 regression) | Members `sdb`/`sdc` NOT classified as protected — `detect_boot_device.yml` only walks system mountpoints, not data mounts |
+| 6 | Azure ephemeral resource disk mounted at `/mnt` | `sdb` excluded from discovery; data disks `sdc`/`sdd` survive. Also audits that `/mnt` + `/mnt/resource` remain in the `SYSTEM_MOUNTS` allow-list |
+
+## `test_azure_az_map.yml`
+
+Covers Azure AZ derivation, added with Azure support on 2026-08-24.
+
+Azure exposes two different placement values that are easy to conflate:
+`zone` (availability zone, **1-based**, and an **empty string** rather than
+absent on non-zonal VMs) and `platformFaultDomain` (**0-based**, IMDS only).
+Getting either wrong is silent: an `is defined` test on `zone` makes every
+non-zonal node render a bare `AZ`, and a missing `+1` on the fault domain
+renders `AZ0` — a zone label Hammerspace never assigns.
+
+The AZ expression lives once in `vars/main.yml` as `_cloud_az_detected`. This
+test loads the **real** expression via `include_vars` rather than copying it,
+so the assertions cannot drift from production.
+
+Test cases:
+
+| # | Scenario | Expected behavior |
+|---|----------|-------------------|
+| 1 | `vars/main.yml` defines `_cloud_az_detected` + the Azure IMDS vars | Present; `hammerspace_azure_imds_az` defaults `false` |
+| 2 | `azure_zone: "2"` | → `AZ2` (1-based, verbatim) |
+| 3 | `azure_zone: "3"` + `azure_fault_domain: "0"` | → `AZ3` — zone outranks fault domain |
+| 4 | Non-zonal VM: `azure_zone: ""` + `azure_fault_domain: "0"` / `"2"` | → `AZ1` / `AZ3` — empty zone skipped, fault domain `+1`. Never `AZ0` or bare `AZ` |
+| 5 | `oci_fault_domain: FAULT-DOMAIN-3`, incl. alongside `azure_zone` | → `AZ3` — OCI unchanged and still highest priority |
+| 6 | No cloud metadata at all | Renders empty; `az_map` falls through to name prefix → group → `hammerspace_default_az` |
+| 7 | `hammerspace_node_az` set; volume-name prefix on Azure | Override wins; prefix renders `AZ2:` on Azure and `''` with no metadata |
+| 8 | **Audit:** all three call sites, include order, inventory, requirements | `az_map.yml` / `add_volume.yml` / `plays/storage.yml` all delegate to `_cloud_az_detected`; `azure_imds_az.yml` is included *before* `az_map.yml`; `inventory.azure.yml` uses `azure.azcollection.azure_rm`; `requirements.yml` pins `azure.azcollection` |
+| 9 | IMDS request failed (no `json` key) / sparse payload / full payload | Parses to `{}` and empty strings without raising; full payload → `AZ2`. **Audits** that `azure_imds_az.yml` uses no `result.attr \| default(...)` — the 2026-07-21 sunrpc failure mode |
+
+TEST 8 is the regression-prevention case: if anyone re-derives the AZ locally
+from `oci_fault_domain` in a call site again, Azure hosts silently fall back to
+`hammerspace_default_az` there — this test fails before merge.
+
+**Second gotcha:** the IMDS request uses `failed_when: false`, so on a
+non-Azure host the registered result has **no `json` key at all**. Writing
+`_azure_imds_raw.json | default({})` would hard-fail with `'dict object' has
+no attribute 'json'` before `default` ever runs — the exact 2026-07-21 sunrpc
+failure mode. TEST 9's audit case blocks that from coming back.
+
+**Gotcha this test encodes:** `ansible.cfg` enables `jinja2_native`, so
+`_cloud_az_detected` renders to `None`, not `""`, when no branch matches. A
+plain `| default('')` does not catch `None`, and `None | trim` stringifies to
+the literal `"None"` — which would become the AZ label. Every consumption site
+must use `| default('', true) | trim`.
 
 ## `test_run_sh_locale.sh`
 
@@ -195,6 +241,28 @@ FAILED: 0
 ============================================================
 ```
 
+## `test_nfs_sunrpc_status.yml`
+
+Regression test for the 2026-07-21 `'dict object' has no attribute 'rc'`
+crash in `roles/nfs_setup/tasks/main.yml` (Display sunrpc pool_mode status).
+`sunrpc_unload` is registered by a task *inside* a `when`-guarded block; when
+the block is skipped (check mode / `pool_mode` already set /
+`node_already_in_hammerspace`), the skipped task still defines the variable as
+a `{skipped: true, ...}` dict **without an `rc` key**. The old status template
+did `sunrpc_unload.rc | default(0)`, which hard-fails on strict ansible-core
+versions before `default` can run. Fix guards the attribute:
+`sunrpc_unload.rc is defined and sunrpc_unload.rc != 0`.
+
+Test cases:
+
+| # | Scenario | Expected |
+|---|----------|----------|
+| 1 | Skipped register result shape | Defined dict, `skipped: true`, **no `rc` key** (root-cause invariant, version-independent) |
+| 2 | Fixed template + skipped dict | Renders `SAVED`, no crash |
+| 3 | Fixed template + `rc=0` (unload succeeded) | Renders `SAVED` |
+| 4 | Fixed template + `rc=1` (unload failed, module in use) | Renders `REBOOT` — the branch still fires |
+| 5 | `sunrpc_unload` undefined + `pool_mode=pernode` | Renders `OK` — `is defined` short-circuits cleanly |
+
 ## When to run
 
 - Before merging any change to `roles/nvme_discovery/tasks/detect_boot_device.yml`
@@ -207,13 +275,24 @@ FAILED: 0
 - After any change to `roles/raid_setup/tasks/main.yml` (idempotency
   detection, `_device_remap`, or the per-element list rebuild pattern)
 - After any change to `scripts/run.sh` (locale-fallback chain)
+- After any change to `roles/nfs_setup/tasks/main.yml` that references a
+  variable registered inside a `when`-guarded block (skipped-result dicts
+  lack `rc`/`stdout`/etc. — always guard with `is defined`)
+- After any change to `_cloud_az_detected` in `vars/main.yml`, to
+  `roles/hammerspace_integration/tasks/az_map.yml` /
+  `azure_imds_az.yml` / `add_volume.yml`, or to the AZ columns in
+  `plays/storage.yml`'s instance report
+- After adding a cloud provider, an inventory plugin, or a new entry to the
+  `SYSTEM_MOUNTS` allow-list in
+  `roles/nvme_discovery/tasks/detect_boot_device.yml`
 
 Wire into pre-merge CI as `./tests/run_all.sh` — it runs every check in one
 command and exits non-zero on any failure.
 
 ## Notes
 
-- TEST 6 needs the `ko_KR.UTF-8` locale generated on the host. If
+- TEST 6 **of `test_run_sh_locale.sh`** needs the `ko_KR.UTF-8` locale
+  generated on the host. If
   it's missing, the test will skip rather than fail spuriously.
   Generate with `localectl set-locale ko_KR.UTF-8` (RHEL/Rocky) or
   `locale-gen ko_KR.UTF-8` (Debian/Ubuntu). The test still validates

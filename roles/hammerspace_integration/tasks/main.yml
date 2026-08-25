@@ -132,6 +132,16 @@
     hs_node_ip: "{{ hammerspace_node_ip | default(ansible_default_ipv4.address) }}"
 
 # =============================================================================
+# Azure AZ Detection (Optional - must precede AZ mapping, which consumes
+# the azure_zone / azure_fault_domain facts this sets)
+# =============================================================================
+
+- name: Detect AZ from Azure Instance Metadata Service
+  ansible.builtin.include_tasks: azure_imds_az.yml
+  when: hammerspace_azure_imds_az | default(false)
+  tags: [hammerspace, azure-imds-az]
+
+# =============================================================================
 # AZ Mapping (Optional - before node registration)
 # =============================================================================
 

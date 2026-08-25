@@ -19,7 +19,7 @@
       {%- elif not (hammerspace_volume_az_prefix_enabled | default(false)) -%}
 
       {%- elif (hammerspace_volume_az_prefix_mode | default('')) == 'auto' -%}
-        {{ oci_fault_domain | default('') | regex_replace('FAULT-DOMAIN-', 'AZ') }}{{ ':' if oci_fault_domain is defined and oci_fault_domain else '' }}
+        {{ (_cloud_az_detected | default('', true) | trim) }}{{ ':' if (_cloud_az_detected | default('', true) | trim | length) > 0 else '' }}
       {%- elif group_names | default([]) | select('match', '^AZ[0-9]+$') | list | length > 0 -%}
         {{ (group_names | default([]) | select('match', '^AZ[0-9]+$') | list)[0] ~ ':' }}
       {%- else -%}

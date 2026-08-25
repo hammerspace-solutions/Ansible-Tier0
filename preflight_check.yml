@@ -7,6 +7,7 @@
 #   ansible-playbook preflight_check.yml -i inventory.aws.yml
 #   ansible-playbook preflight_check.yml -i inventory.gcp.yml
 #   ansible-playbook preflight_check.yml -i inventory.oci.yml
+#   ansible-playbook preflight_check.yml -i inventory.azure.yml
 #
 # Output:
 #   - Report of registered vs new instances

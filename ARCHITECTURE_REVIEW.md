@@ -2,7 +2,14 @@
 
 **Review Date:** March 26, 2026
 **Codebase:** ~6,080 lines YAML (33 task files, 7 roles) + ~2,550 lines Python (5 scripts) + ~1,260 lines playbooks = **~16,600 lines total**
-**Verdict:** Production-ready for Tier 0 / LSS deployments across OCI, AWS, GCP, Azure, and on-prem
+**Verdict:** Production-ready for Tier 0 / LSS deployments across OCI, AWS, GCP, and on-prem
+
+> **Correction (2026-08-24):** this review listed Azure as supported, but no
+> Azure inventory, collection requirement, or placement handling existed at the
+> time — `inventory.az.yml` is a static availability-zone-grouped inventory, not
+> an Azure one. Azure support (`inventory.azure.yml`,
+> `azure.azcollection`, IMDS zone/fault-domain detection, ephemeral
+> resource-disk protection) was added on 2026-08-24.
 
 ---
 
@@ -33,7 +40,7 @@
 - 7-role architecture with clear separation of concerns
 - Dynamic storage discovery (NVMe, HDD, SSD, mixed) with NUMA-aware RAID grouping
 - CPU vendor auto-detection (15+ profiles: AMD EPYC, Intel Xeon, ARM Neoverse/Ampere/Graviton/Grace) with tuned RAID/IO settings
-- Multi-cloud inventory (OCI, AWS, GCP, Azure) + static darksite
+- Multi-cloud inventory (OCI, AWS, GCP, Azure — Azure added 2026-08-24) + static darksite
 - Hammerspace REST API integration: node, volume, share, volume group, S3, AZ mapping, cluster config (DNS, AD, site, location, Prometheus)
 - Dual API transport: `shell+curl` (Python 3.13+) with `ansible.builtin.uri` fallback (Python < 3.13), auto-detected via `hammerspace_api_method`
 - Reusable API wrappers: `_api_request.yml` and `_api_poll_task.yml` abstract transport choice
@@ -79,7 +86,12 @@ Ansible-Tier0/
 ├── inventory.oci.yml                 # OCI dynamic inventory
 ├── inventory.aws.yml                 # AWS dynamic inventory
 ├── inventory.gcp.yml                 # GCP dynamic inventory
-├── inventory.az.yml                  # Azure dynamic inventory
+├── inventory.azure.yml               # Azure dynamic inventory (added 2026-08-24)
+├── inventory.az.yml                  # STATIC availability-zone-grouped inventory.
+│                                     #   NOT Azure — "az" = availability zone.
+│                                     #   (The Mar 26 review mislabelled this
+│                                     #    file as Azure; there was no Azure
+│                                     #    support in the tree until 2026-08-24.)
 │
 ├── roles/
 │   ├── nvme_discovery/               # 1,239 lines — 5 task files

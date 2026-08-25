@@ -7,6 +7,7 @@
 #   ./deploy_new_instances.sh -i inventory.aws.yml    # AWS inventory
 #   ./deploy_new_instances.sh -i inventory.gcp.yml    # GCP inventory
 #   ./deploy_new_instances.sh -i inventory.oci.yml    # OCI inventory
+#   ./deploy_new_instances.sh -i inventory.azure.yml  # Azure inventory
 #   ./deploy_new_instances.sh -i inventory.aws.yml --check   # Dry run
 #   ./deploy_new_instances.sh -i inventory.aws.yml --auto    # No confirmation
 #

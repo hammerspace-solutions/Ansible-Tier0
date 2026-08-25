@@ -1,5 +1,9 @@
 ---
-# Inventory file for storage servers (AZ-ready)
+# STATIC inventory for storage servers, pre-grouped by availability zone.
+#
+# NOT AZURE. "az" here means availability zone. For Microsoft Azure use
+# inventory.azure.yml (azure.azcollection.azure_rm plugin).
+#
 # Customize this for your environment
 #
 # Usage: ansible-playbook -i inventory.az.yml site.yml

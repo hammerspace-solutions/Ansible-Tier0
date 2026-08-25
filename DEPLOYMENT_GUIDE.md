@@ -2,6 +2,14 @@
 
 Step-by-step guide for deploying Hammerspace Tier 0 storage on Oracle Cloud Infrastructure (OCI) GPU instances.
 
+> **Other clouds:** this guide is OCI-specific.
+> **Azure has its own end-to-end guide:**
+> [DEPLOYMENT_GUIDE_AZURE.md](DEPLOYMENT_GUIDE_AZURE.md).
+> AWS and GCP follow this guide's flow — only sections 3 (authentication) and 4
+> (inventory) differ. See "Configure Inventory → Option C/D" in
+> [README.md](README.md) for the per-provider setup, then rejoin this guide at
+> section 5 (Configure Variables).
+
 ---
 
 ## Table of Contents
@@ -148,6 +156,12 @@ Edit `ansible.cfg` to use OCI dynamic inventory and SSH key:
 inventory = inventory.oci.yml
 private_key_file = /path/to/your/ssh/key    # <-- Path to your SSH private key
 ```
+
+On another cloud, point `inventory` at that provider's file instead —
+`inventory.aws.yml` or `inventory.gcp.yml`. (Note `inventory.az.yml` is a
+**static availability-zone-grouped** inventory, not an Azure one.) For Azure,
+follow [DEPLOYMENT_GUIDE_AZURE.md](DEPLOYMENT_GUIDE_AZURE.md) instead — the
+remote user, disk layout and AZ handling all differ.
 
 **Important:** The SSH public key must be configured on all GPU instances. Ensure:
 

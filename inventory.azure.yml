@@ -1,0 +1,84 @@
+---
+# Azure Dynamic Inventory for Ansible
+# Prerequisites:
+#   ansible-galaxy collection install azure.azcollection
+#   pip3 install -r ~/.ansible/collections/ansible_collections/azure/azcollection/requirements.txt
+#   Configure Azure credentials
+#
+# Authentication options:
+#   Option 1: Azure CLI - run 'az login' (auth_source: cli)
+#     az login
+#     az account set --subscription <subscription-id>
+#   Option 2: Service principal via environment variables:
+#     export AZURE_SUBSCRIPTION_ID='...'
+#     export AZURE_CLIENT_ID='...'
+#     export AZURE_SECRET='...'
+#     export AZURE_TENANT='...'
+#   Option 3: Managed identity (when running on an Azure VM) - auth_source: msi
+#
+# NOTE: the file MUST be named with an `azure_rm.yml` / `azure.yml` suffix for
+# the plugin to be recognized. `inventory.azure.yml` matches the `azure.yml`
+# suffix rule. Do NOT confuse this file with `inventory.az.yml`, which is a
+# STATIC availability-zone-grouped inventory and is unrelated to Azure.
+#
+# Test with: ansible-inventory -i inventory.azure.yml --list
+
+plugin: azure.azcollection.azure_rm
+
+# Which resource groups to pull VMs from - REQUIRED: update for your environment.
+# Remove this key entirely to scan the whole subscription (slower).
+include_vm_resource_groups:
+  - tier0-rg
+
+# Use the bare VM name as the Ansible inventory hostname instead of the
+# default "name_(resourcegroup)" form. Keeps hostnames matching the
+# Hammerspace node names.
+plain_host_names: true
+
+# auto -> tries env vars, then credential profile, then CLI, then MSI.
+auth_source: auto
+
+# Only running, successfully-provisioned VMs (these are the plugin defaults;
+# restated here so they are visible/editable).
+exclude_host_filters:
+  - "powerstate != 'running'"
+  - "provisioning_state != 'succeeded'"
+
+# Host variables consumed by the Tier 0 roles.
+#
+# azure_zone / azure_fault_domain feed the AZ-derivation chain in
+# vars/main.yml (_cloud_az_detected). `availability_zone` is exposed by the
+# azure_rm plugin from the VM's `zones` property and is null/absent for
+# non-zonal VMs (availability sets, or regions without zones). In that case
+# leave it unset here and enable `hammerspace_azure_imds_az: true` so the AZ
+# is read from Instance Metadata Service (which also exposes the platform
+# fault domain). See roles/hammerspace_integration/tasks/azure_imds_az.yml.
+hostvar_expressions:
+  ansible_host: private_ipv4_addresses[0]
+  azure_zone: availability_zone | default(None)
+  azure_vm_size: virtual_machine_size | default(None)
+  azure_location: location | default(None)
+  azure_resource_group: resource_group | default(None)
+
+# Put every discovered VM into the storage_servers group the plays target.
+# Tighten the expression (e.g. on a tag) if the resource group holds more
+# than Tier 0 nodes.
+conditional_groups:
+  storage_servers: "'tier0' in name"
+
+# Group by zone (az1, az2, ...) so on-prem-style AZ group names still work as
+# a fallback AZ source, and by VM size for targeted --limit runs.
+keyed_groups:
+  - key: availability_zone
+    prefix: az
+    separator: ''
+  - key: virtual_machine_size
+    prefix: size
+  - key: location
+    prefix: loc
+
+# Cache the API results - Azure inventory calls are slow on large subscriptions.
+cache: true
+cache_plugin: jsonfile
+cache_timeout: 300
+cache_connection: /tmp/ansible_azure_inventory_cache

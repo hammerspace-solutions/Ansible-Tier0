@@ -44,7 +44,7 @@ Vault-encrypted values live in `vars/vault.yml`.
 | `nvme_exclude_numa_nodes` | `[]` | Exclude all drives on specific NUMA nodes. |
 | `nvme_exclude_pcie_addresses` | `[]` | Exclude by PCIe address (e.g., `0000:03:00.0`). |
 | `nvme_exclude_pcie_prefixes` | `[]` | Exclude by PCIe bus prefix (e.g., `0000:03`). |
-| `additional_exclude_devices` | `[]` | Role-level additional excludes (controller names). |
+| `additional_exclude_devices` | `[]` | **Unused.** Declared in `roles/nvme_discovery/defaults/main.yml` but referenced by no task — setting it has no effect. Use `nvme_exclude_devices` / `scsi_exclude_devices` instead. |
 
 ## SCSI/SATA Device Exclusion
 
@@ -149,6 +149,41 @@ Used when `use_dynamic_discovery: false`.
 | `hammerspace_enable_az_mapping` | `false` | Parse AZ from node name (format: `"AZ1:node-name"`). |
 | `hammerspace_apply_az_labels` | `false` | Apply AZ labels to nodes via API. |
 | `hammerspace_default_az` | `"AZ1"` (vars) / `"default"` (defaults) | Default AZ when not detected. |
+| `hammerspace_azure_imds_az` | `false` | Query Azure IMDS for `zone` / `platformFaultDomain`. Enable on Azure. |
+| `azure_imds_api_version` | `"2021-02-01"` | Azure IMDS API version. |
+| `azure_imds_timeout` | `5` | IMDS request timeout in seconds. |
+| `_cloud_az_detected` | *(computed)* | Shared AZ expression. See below — **do not** re-derive the AZ elsewhere. |
+
+### Cloud placement host variables
+
+Supplied by the dynamic inventories, or by `azure_imds_az.yml` when
+`hammerspace_azure_imds_az: true`.
+
+| Variable | Source | Base | Maps to |
+|----------|--------|------|---------|
+| `oci_fault_domain` | `inventory.oci.yml` | `FAULT-DOMAIN-N` | `AZN` |
+| `azure_zone` | `inventory.azure.yml`, Azure IMDS | **1-based** (`"1"`, `"2"`) | `AZ1`, `AZ2` |
+| `azure_fault_domain` | Azure IMDS only | **0-based** (`"0"`, `"1"`) | `AZ1`, `AZ2` (i.e. `+1`) |
+
+Precedence: `hammerspace_node_az` > `oci_fault_domain` > `azure_zone` >
+`azure_fault_domain` > `"AZ1:"` prefix in the node name > inventory group
+matching `^AZ[0-9]+$` > `hammerspace_default_az`.
+
+`azure_zone` is an **empty string** — not absent — on non-zonal Azure VMs
+(availability sets), so it is tested for length rather than `is defined`.
+
+### `_cloud_az_detected`
+
+Defined once in `vars/main.yml` and consumed by `az_map.yml` (node AZ label),
+`add_volume.yml` (volume-name prefix) and `plays/storage.yml`
+(`instance_report.csv`). Adding a provider means editing that one expression,
+not the three call sites.
+
+It renders to `None` (not `""`) when nothing matches, because `jinja2_native`
+is enabled. **Always consume it as `_cloud_az_detected | default('', true) |
+trim`** — a plain `| default('')` does not catch `None`, and `None | trim`
+stringifies to the literal `"None"`, which then becomes the AZ label.
+`tests/integration/test_azure_az_map.yml` audits all three call sites.
 
 ## Volume Groups
 

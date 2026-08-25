@@ -334,6 +334,88 @@
             _test_failures: "{{ _test_failures + ['TEST 5: ' ~ (ansible_failed_result.msg | default('unknown'))] }}"
 
     # ========================================================================
+    # TEST 6: Azure ephemeral RESOURCE DISK safety.
+    #
+    # On Azure VMs cloud-init formats and mounts the temporary resource disk
+    # (typically /dev/sdb) at /mnt (or /mnt/resource on some images). That
+    # disk is NOT durable — it is wiped on deallocate/redeploy — so it must
+    # never be RAIDed or mkfs'd. Before Azure support, /mnt was absent from
+    # the SYSTEM_MOUNTS allow-list, so a `storage_type: ssd|hdd` run on Azure
+    # would treat /dev/sdb as an ordinary unprotected /dev/sd* candidate.
+    #
+    # Two assertions:
+    #   a) the literal allow-list in detect_boot_device.yml still contains
+    #      /mnt and /mnt/resource (audit — stops a silent removal), and
+    #   b) with sdb resolved from /mnt, discovery keeps the real data disks
+    #      and drops only boot + resource disk.
+    # ========================================================================
+    - name: 'TEST 6: Azure ephemeral resource disk (/mnt) is protected'
+      block:
+        - name: Read the real detect_boot_device.yml allow-list
+          ansible.builtin.slurp:
+            src: "{{ playbook_dir }}/../../roles/nvme_discovery/tasks/detect_boot_device.yml"
+          register: _detect_src
+
+        # regex_search over the whole blob rather than splitlines: inside a
+        # YAML folded scalar a Jinja '\n' literal is not a newline, so a
+        # .split('\n') here silently yields a single element.
+        - name: Extract the SYSTEM_MOUNTS assignment
+          ansible.builtin.set_fact:
+            _system_mounts_line: >-
+              {{ (_detect_src.content | b64decode)
+                 | regex_search('SYSTEM_MOUNTS="[^"]*"') | default('', true) }}
+
+        - name: 'TEST 6 ASSERT (audit): /mnt and /mnt/resource are in SYSTEM_MOUNTS'
+          ansible.builtin.assert:
+            that:
+              - _system_mounts_line | length > 0
+              - "' /mnt ' in _system_mounts_line"
+              - "'/mnt/resource' in _system_mounts_line"
+            fail_msg: |
+              REGRESSION: the Azure ephemeral resource disk mountpoints were
+              removed from the SYSTEM_MOUNTS allow-list in
+              roles/nvme_discovery/tasks/detect_boot_device.yml. Without them a
+              storage_type: ssd|hdd run on Azure can mkfs/RAID /dev/sdb, the
+              non-durable temp disk. Line found: {{ _system_mounts_line }}
+
+        # Azure layout: sda = OS disk (/), sdb = resource disk (/mnt),
+        # sdc + sdd = attached premium/local data disks to be RAIDed.
+        - name: Simulate Azure protected walk (system mounts incl. /mnt)
+          ansible.builtin.set_fact:
+            _protected_disks_AZURE:
+              - sda      # OS disk, mounted at /
+              - sdb      # ephemeral resource disk, mounted at /mnt
+            scsi_all_devices_azure:
+              - {name: sda, device: /dev/sda, numa: 0, serial: OSDISK, model: "Virtual Disk", pcie_address: "N/A", rotational: 0}
+              - {name: sdb, device: /dev/sdb, numa: 0, serial: RESRC1, model: "Virtual Disk", pcie_address: "N/A", rotational: 0}
+              - {name: sdc, device: /dev/sdc, numa: 0, serial: DATA01, model: "Virtual Disk", pcie_address: "N/A", rotational: 0}
+              - {name: sdd, device: /dev/sdd, numa: 0, serial: DATA02, model: "Virtual Disk", pcie_address: "N/A", rotational: 0}
+
+        - name: Apply rejectattr with the Azure protected list
+          ansible.builtin.set_fact:
+            scsi_devices_AZURE: >-
+              {{ scsi_all_devices_azure
+                 | rejectattr('name', 'in', _protected_disks_AZURE)
+                 | list }}
+
+        - name: 'TEST 6 ASSERT: only sdc + sdd reach discovery'
+          ansible.builtin.assert:
+            that:
+              - (scsi_devices_AZURE | map(attribute='name') | list | sort) == ['sdc', 'sdd']
+              - "'sdb' not in (scsi_devices_AZURE | map(attribute='name') | list)"
+            fail_msg: |
+              Azure resource disk sdb must be excluded from discovery and the
+              two data disks must survive. Got:
+              {{ scsi_devices_AZURE | map(attribute='name') | list }}
+
+        - name: Record TEST 6 pass
+          ansible.builtin.set_fact:
+            _test_passes: "{{ _test_passes + ['TEST 6: Azure ephemeral resource disk (/mnt) excluded; data disks survive'] }}"
+      rescue:
+        - ansible.builtin.set_fact:
+            _test_failures: "{{ _test_failures + ['TEST 6: ' ~ (ansible_failed_result.msg | default('unknown'))] }}"
+
+    # ========================================================================
     # Report
     # ========================================================================
     - name: Print test report

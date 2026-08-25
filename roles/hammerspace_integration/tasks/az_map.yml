@@ -5,7 +5,10 @@
 #
 # AZ detection priority:
 # 1. Explicit hammerspace_node_az variable
-# 2. OCI fault domain (if oci_fault_domain is defined from dynamic inventory)
+# 2. Cloud placement metadata via _cloud_az_detected (vars/main.yml):
+#      OCI   oci_fault_domain    FAULT-DOMAIN-2 -> AZ2
+#      Azure azure_zone          "2"            -> AZ2
+#      Azure azure_fault_domain  "1"            -> AZ2  (0-based, +1)
 # 3. AZ prefix in node name format "AZ1:node-name"
 # 4. Inventory group name matching AZ pattern (e.g., AZ1, AZ2 groups in on-prem inventory)
 # 5. Default AZ (hammerspace_default_az)
@@ -15,8 +18,8 @@
     node_az: >-
       {%- if hammerspace_node_az is defined -%}
         {{ hammerspace_node_az }}
-      {%- elif oci_fault_domain is defined and oci_fault_domain -%}
-        {{ oci_fault_domain | regex_replace('FAULT-DOMAIN-', 'AZ') }}
+      {%- elif (_cloud_az_detected | default('', true) | trim | length) > 0 -%}
+        {{ _cloud_az_detected | default('', true) | trim }}
       {%- elif ':' in hs_node_name -%}
         {{ hs_node_name.split(':')[0] }}
       {%- elif group_names | default([]) | select('match', '^AZ[0-9]+$') | list | length > 0 -%}

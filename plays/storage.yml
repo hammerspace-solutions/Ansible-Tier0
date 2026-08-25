@@ -211,9 +211,23 @@
     # =========================================================================
     # Generate Instance Report (display_name, fault_domain, AZ)
     # =========================================================================
-    - name: Convert fault domain to AZ for report
+    # AZ derivation is centralized in vars/main.yml (_cloud_az_detected) so
+    # OCI / Azure stay in sync with az_map.yml and add_volume.yml.
+    - name: Convert cloud placement metadata to AZ for report
       ansible.builtin.set_fact:
-        converted_az: "{{ oci_fault_domain | default('N/A') | regex_replace('FAULT-DOMAIN-', 'AZ') }}"
+        converted_az: "{{ (_cloud_az_detected | default('', true) | trim) | default('N/A', true) }}"
+        # Self-describing: the CSV column is named fault_domain, but on Azure
+        # the value may be a ZONE. Tag it so the report is not ambiguous.
+        report_fault_domain: >-
+          {%- if oci_fault_domain is defined and oci_fault_domain -%}
+            {{ oci_fault_domain }}
+          {%- elif azure_zone is defined and azure_zone is not none and (azure_zone | string | trim | length) > 0 -%}
+            azure-zone-{{ azure_zone | string | trim }}
+          {%- elif azure_fault_domain is defined and azure_fault_domain is not none and (azure_fault_domain | string | trim | length) > 0 -%}
+            azure-fd-{{ azure_fault_domain | string | trim }}
+          {%- else -%}
+            N/A
+          {%- endif -%}
 
     - name: Set report file path
       ansible.builtin.set_fact:
@@ -233,7 +247,7 @@
       ansible.builtin.lineinfile:
         path: "{{ instance_report_file }}"
         regexp: "^{{ inventory_hostname }},"
-        line: "{{ inventory_hostname }},{{ oci_fault_domain | default('N/A') }},{{ converted_az }}"
+        line: "{{ inventory_hostname }},{{ report_fault_domain | trim }},{{ converted_az }}"
         mode: '0644'
       delegate_to: localhost
       when: not ansible_check_mode

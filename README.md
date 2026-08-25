@@ -73,6 +73,7 @@ Tier 0 transforms existing local NVMe storage on GPU servers into ultra-fast, pe
 - **AWS EC2**: Dynamic inventory via `amazon.aws.aws_ec2` plugin
 - **GCP Compute Engine**: Dynamic inventory via `google.cloud.gcp_compute` plugin
 - **OCI**: Dynamic inventory via `oracle.oci.oci` plugin
+- **Azure**: Dynamic inventory via `azure.azcollection.azure_rm` plugin
 - **Preflight Check**: Compares cloud inventory with Hammerspace to find new instances
 - **Incremental Deployment**: Deploy only to instances not yet registered in Hammerspace
 
@@ -85,6 +86,10 @@ ansible-storage-setup/
 ├── inventory.oci.yml        # OCI dynamic inventory (auto-discovery)
 ├── inventory.aws.yml        # AWS EC2 dynamic inventory (auto-discovery)
 ├── inventory.gcp.yml        # GCP Compute Engine dynamic inventory (auto-discovery)
+├── inventory.azure.yml      # Azure dynamic inventory (auto-discovery)
+├── DEPLOYMENT_GUIDE_AZURE.md  # Azure end-to-end deployment walkthrough
+├── inventory.az.yml         # STATIC availability-zone-grouped inventory
+│                            #   (NOT Azure — "az" here means availability zone)
 ├── site.yml                 # Top-level playbook (imports plays/*.yml — Tier0 + optional DI)
 ├── plays/                   # Individual plays composed by site.yml
 │   ├── storage.yml          # RAID, filesystem, NFS, perf, HS integration (storage_servers)
@@ -245,6 +250,8 @@ You can use **static inventory** (manual) or **dynamic inventory** for auto-disc
 | OCI Dynamic | `inventory.oci.yml` | Oracle Cloud Infrastructure |
 | AWS Dynamic | `inventory.aws.yml` | Amazon Web Services EC2 |
 | GCP Dynamic | `inventory.gcp.yml` | Google Cloud Platform Compute Engine |
+| Azure Dynamic | `inventory.azure.yml` | Microsoft Azure Virtual Machines |
+| Static AZ-grouped | `inventory.az.yml` | Manual list pre-grouped by availability zone. **Not Azure.** |
 
 #### Option A: Static Inventory (Manual)
 
@@ -606,7 +613,135 @@ ansible storage_servers -m ping
 | us-central1-b | `AZ2:` |
 | us-central1-c | `AZ3:` |
 
-#### Option E: Multi-Cloud Inventory
+#### Option E: Azure Dynamic Inventory (Virtual Machines)
+
+Auto-discover VMs from Microsoft Azure.
+
+> **Full walkthrough:** [DEPLOYMENT_GUIDE_AZURE.md](DEPLOYMENT_GUIDE_AZURE.md)
+> covers the end-to-end Azure deployment — SKU/disk-layout selection,
+> Accelerated Networking, NSG rules, the ephemeral resource disk, and zonal vs
+> availability-set AZ mapping. The steps below are the inventory setup only.
+
+**1. Install the Azure Ansible collection and Python SDK:**
+```bash
+ansible-galaxy collection install azure.azcollection
+
+# The collection ships its own (large) Python requirements file
+pip3 install -r ~/.ansible/collections/ansible_collections/azure/azcollection/requirements.txt
+```
+
+**2. Configure Azure authentication (pick one):**
+```bash
+# Option 1: Azure CLI (simplest for interactive use)
+az login
+az account set --subscription <subscription-id>
+
+# Option 2: Service principal via environment variables
+export AZURE_SUBSCRIPTION_ID='...'
+export AZURE_CLIENT_ID='...'
+export AZURE_SECRET='...'
+export AZURE_TENANT='...'
+
+# Option 3: Managed identity — set `auth_source: msi` in inventory.azure.yml
+# when the Ansible controller is itself an Azure VM.
+```
+
+**3. Edit `inventory.azure.yml`:**
+
+Set `include_vm_resource_groups` to the resource group(s) holding the Tier 0
+VMs, and make sure `conditional_groups.storage_servers` matches your naming:
+
+```yaml
+plugin: azure.azcollection.azure_rm
+
+include_vm_resource_groups:
+  - tier0-rg
+
+plain_host_names: true
+auth_source: auto
+
+conditional_groups:
+  storage_servers: "'tier0' in name"
+```
+
+> **Naming matters:** the plugin is only recognised for files ending in
+> `azure_rm.yml` or `azure.yml`. `inventory.azure.yml` satisfies the second
+> rule. Do **not** rename it to something like `inventory-azure.yml`.
+
+**4. Test the inventory:**
+```bash
+ansible-inventory -i inventory.azure.yml --list
+ansible-inventory -i inventory.azure.yml --graph
+ansible -i inventory.azure.yml storage_servers -m ping
+```
+
+**5. Deploy:**
+```bash
+./scripts/run.sh -i inventory.azure.yml site.yml
+```
+
+**Azure Instance Metadata Exposed:**
+
+| Variable | Source | Description | Example |
+|----------|--------|-------------|---------|
+| `azure_zone` | inventory + IMDS | Availability Zone, **1-based**. Empty on non-zonal VMs | `"2"` |
+| `azure_fault_domain` | IMDS only | Platform fault domain, **0-based** | `"1"` |
+| `azure_location` | inventory + IMDS | Region | `"westus2"` |
+| `azure_vm_size` | inventory + IMDS | VM SKU | `"Standard_L16s_v3"` |
+| `azure_resource_group` | inventory + IMDS | Resource group | `"tier0-rg"` |
+
+**Azure AZ Mapping:**
+
+| Azure placement | Hammerspace AZ | Note |
+|-----------------|----------------|------|
+| `zone` = `"1"` | `AZ1` | 1-based, used verbatim |
+| `zone` = `"2"` | `AZ2` | |
+| `platformFaultDomain` = `0` | `AZ1` | **0-based — mapped as +1** |
+| `platformFaultDomain` = `1` | `AZ2` | |
+
+Zone wins when both are present. Set `hammerspace_node_az` per host to override.
+
+**6. Non-zonal VMs (availability sets) — enable IMDS detection:**
+
+The inventory plugin exposes `availability_zone` but **never** the fault
+domain. If your VMs are in an availability set rather than availability zones,
+the inventory alone gives every node the same (empty) zone. Turn on IMDS
+detection in `vars/main.yml` so the fault domain is read from the VM itself:
+
+```yaml
+hammerspace_enable_az_mapping: true
+hammerspace_azure_imds_az: true
+```
+
+This queries `http://169.254.169.254/metadata/instance/compute` on each host.
+It is safe to leave enabled on non-Azure hosts — the request has a short
+timeout, failure is tolerated, and the AZ chain simply falls through.
+
+**7. Azure ephemeral resource disk:**
+
+Azure VMs get a temporary **resource disk** (usually `/dev/sdb`) that
+cloud-init formats and mounts at `/mnt`. It is **wiped on
+deallocate/redeploy** and must never join a Tier 0 RAID set. Disk discovery
+protects it automatically — `/mnt` and `/mnt/resource` are in the
+SYSTEM-mountpoint allow-list in
+`roles/nvme_discovery/tasks/detect_boot_device.yml`. Verify before a real run:
+
+```bash
+./scripts/run.sh -i inventory.azure.yml site.yml --check --tags discovery
+```
+
+and confirm the "Disk classification" output lists the resource disk under
+STRICT protected.
+
+Choose `storage_type` to match the VM SKU:
+
+| Azure SKU family | Local storage | `storage_type` |
+|------------------|---------------|----------------|
+| Lsv3 / Lasv3 (storage optimized) | Local NVMe | `nvme` |
+| ND / NC (GPU) | Local NVMe | `nvme` |
+| Attached Premium SSD v2 / Ultra Disk | Managed disks as `/dev/sd*` | `ssd` |
+
+#### Option F: Multi-Cloud Inventory
 
 Use multiple cloud providers simultaneously by specifying multiple inventory files:
 
@@ -614,19 +749,19 @@ Use multiple cloud providers simultaneously by specifying multiple inventory fil
 ```ini
 [defaults]
 # Combine all cloud inventories
-inventory = inventory.oci.yml,inventory.aws.yml,inventory.gcp.yml
+inventory = inventory.oci.yml,inventory.aws.yml,inventory.gcp.yml,inventory.azure.yml
 ```
 
 **2. Or specify at runtime:**
 ```bash
 # Use all inventories
-ansible-playbook -i inventory.oci.yml -i inventory.aws.yml -i inventory.gcp.yml site.yml
+ansible-playbook -i inventory.oci.yml -i inventory.aws.yml -i inventory.gcp.yml -i inventory.azure.yml site.yml
 
 # Target specific cloud
 ansible-playbook -i inventory.aws.yml site.yml
 
 # View combined inventory
-ansible-inventory -i inventory.oci.yml -i inventory.aws.yml -i inventory.gcp.yml --graph
+ansible-inventory -i inventory.oci.yml -i inventory.aws.yml -i inventory.gcp.yml -i inventory.azure.yml --graph
 ```
 
 **3. Target hosts by cloud provider:**
@@ -641,6 +776,9 @@ ansible az_us-west-2a -m ping
 
 # GCP: Target us-central1-a zone
 ansible zone_us-central1-a -m ping
+
+# Azure: Target availability zone 1
+ansible az1 -m ping
 ```
 
 #### Hammerspace Volume AZ Prefix Configuration

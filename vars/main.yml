@@ -439,11 +439,57 @@ hammerspace_task_queue_delay: 10     # Delay between retries (seconds)
 # ============================================================================
 # Enable to parse AZ from node name (format: "AZ1:node-name")
 # Useful for multi-AZ deployments
-# Auto-detects AZ from OCI fault domain (FAULT-DOMAIN-1 -> AZ1, etc.)
+# Auto-detects AZ from the cloud provider's placement metadata:
+#   OCI    FAULT-DOMAIN-1     -> AZ1   (1-based, from inventory.oci.yml)
+#   Azure  zone "1"           -> AZ1   (1-based, from inventory.azure.yml/IMDS)
+#   Azure  platformFaultDomain 0 -> AZ1  (0-BASED, so +1 — IMDS only)
 
 hammerspace_enable_az_mapping: false
 hammerspace_apply_az_labels: false
 hammerspace_default_az: "AZ1"
+
+# ----------------------------------------------------------------------------
+# Cloud-provider AZ derivation (single source of truth)
+# ----------------------------------------------------------------------------
+# Renders the AZ label ("AZ1", "AZ2", ...) from whichever cloud placement
+# hostvar/fact is available, or "" when none is. Consumed by:
+#   roles/hammerspace_integration/tasks/az_map.yml     (node AZ label)
+#   roles/hammerspace_integration/tasks/add_volume.yml (volume name prefix)
+#   plays/storage.yml                                  (instance_report.csv)
+#
+# Defined ONCE here so the three call sites cannot drift. If you add a
+# provider, add it here and extend tests/integration/test_azure_az_map.yml.
+#
+# CONSUMPTION RULE: this renders to None (not "") when no branch matches,
+# because ansible.cfg enables jinja2_native. `| default('')` does NOT catch
+# None — only `| default('', true)` does. Without the `true`, `None | trim`
+# stringifies to the literal "None" and that becomes the AZ label.
+# Always consume as:  _cloud_az_detected | default('', true) | trim
+#
+# Precedence: OCI fault domain > Azure zone > Azure fault domain.
+# Azure `zone` is an EMPTY STRING on non-zonal VMs (availability sets), not
+# absent — so it is tested for length, not `is defined`. `platformFaultDomain`
+# is a string ("0") and is ZERO-based, hence the int cast and the +1.
+_cloud_az_detected: >-
+  {%- if oci_fault_domain is defined and oci_fault_domain -%}
+    {{ oci_fault_domain | regex_replace('FAULT-DOMAIN-', 'AZ') }}
+  {%- elif azure_zone is defined and azure_zone is not none and (azure_zone | string | trim | length) > 0 -%}
+    AZ{{ azure_zone | string | trim }}
+  {%- elif azure_fault_domain is defined and azure_fault_domain is not none and (azure_fault_domain | string | trim | length) > 0 -%}
+    AZ{{ (azure_fault_domain | int) + 1 }}
+  {%- endif -%}
+
+# ----------------------------------------------------------------------------
+# Azure Instance Metadata Service (IMDS) AZ detection
+# ----------------------------------------------------------------------------
+# Queries http://169.254.169.254/metadata/instance/compute for `zone` and
+# `platformFaultDomain`. Enable when running on Azure VMs. Needed even with
+# inventory.azure.yml if the VMs are non-zonal (availability sets), because
+# the inventory plugin exposes only `availability_zone`, never the fault
+# domain. Harmless on non-Azure hosts (short timeout, failure tolerated).
+hammerspace_azure_imds_az: false
+azure_imds_api_version: "2021-02-01"
+azure_imds_timeout: 5
 
 # GPU Fabric AZ Detection (for OCI GPU instances)
 # Automatically determines AZ from the GPU memory fabric OCID.

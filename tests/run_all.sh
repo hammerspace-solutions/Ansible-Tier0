@@ -66,6 +66,7 @@ if command -v yamllint >/dev/null 2>&1; then
         yamllint plays/ scripts/ tests/integration/ \
                  roles/nvme_discovery/tasks/detect_boot_device.yml \
                  roles/raid_setup/tasks/main.yml \
+                 roles/hammerspace_integration/tasks/azure_imds_az.yml \
                  roles/perf_tuning/
 else
     echo "skipping yamllint (not installed)"
