@@ -320,6 +320,41 @@ could not be diagnosed from the log. Guard with length, not just definedness.
 ansible-playbook tests/integration/test_check_mode_detection.yml -i localhost, -c local
 ```
 
+## `test_discovery_diagnostics.yml`
+
+Regression test for the **2026-08-26** "Discovery produced 0 RAID arrays"
+abort. Once check-mode detection was fixed the host classified correctly
+(`boot_device detected: sda`) and then failed here, with a message that named
+the suspects but reported nothing about what the host actually had.
+
+Four distinct causes produce that abort and they need **different** fixes:
+
+| Cause | Symptom | Fix |
+|---|---|---|
+| A | `storage_type: ssd\|hdd` and every `/dev/sd*` has the opposite `rotational` flag. Azure synthetic SCSI reports `rotational=1` even for Premium SSD | `storage_type: scsi` — scans `/dev/sd*` with **no** rotational filter |
+| B | `storage_type` excludes NVMe on a host whose Tier 0 disks are local NVMe (Azure HBv3/L-series, AWS i-series, bare metal). The NVMe block is gated on `storage_type in [nvme, all]` and never ran | `storage_type: nvme` or `all` |
+| C | No candidate disks on either path | check the topology dump |
+| D | Disks found but all excluded | check protected list + `*_exclude_*` vars |
+
+The fix snapshots `scsi_all_devices` into `_scsi_prefilter` **before** the
+rotational filter overwrites it — without that, "no SCSI disks at all" and "the
+filter dropped every disk" are indistinguishable — adds a failure-path topology
+dump (`/sys/class/nvme`, `lsblk`, per-disk `rotational`), and names the most
+likely cause explicitly.
+
+| # | Scenario | Expected behavior |
+|---|----------|-------------------|
+| 1 | Truth table over 6 scenarios | Each selects the correct cause. Case D2 (`storage_type: scsi`, disks survived the absent filter but were excluded) must report D, **not** B — this case caught a real bug in the branch ordering |
+| 2 | **Audit:** source of `main.yml` | `_scsi_prefilter` snapshot precedes the filters; diagnostics task exists, reports NVMe + rotational, and is `check_mode: false`; all four remedies present |
+
+TEST 1 mirrors the branch conditions rather than rendering the real template
+(the message is inline in an `assert` and cannot be invoked standalone), so
+TEST 2 audits the source to catch drift. Keep the two in step.
+
+```bash
+ansible-playbook tests/integration/test_discovery_diagnostics.yml -i localhost, -c local
+```
+
 ## Running
 
 **Linux only** (except `test_scan_disks.sh`, which runs anywhere) — uses

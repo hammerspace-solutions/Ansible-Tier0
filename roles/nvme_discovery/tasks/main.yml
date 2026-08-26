@@ -373,6 +373,15 @@
       loop: "{{ scsi_raw.stdout_lines | default([]) }}"
       when: item | length > 0
 
+    # Snapshot BEFORE the rotational filters below, which overwrite
+    # scsi_all_devices in place. Without this there is no way to tell
+    # "no /dev/sd* devices at all" apart from "devices existed but the
+    # rotational filter dropped every one of them" — the two produce an
+    # identical "Discovery produced 0 RAID arrays" abort.
+    - name: Snapshot SCSI devices before the storage_type filter (diagnostics)
+      ansible.builtin.set_fact:
+        _scsi_prefilter: "{{ scsi_all_devices | default([]) }}"
+
     - name: Filter by storage type (HDD only)
       ansible.builtin.set_fact:
         scsi_all_devices: "{{ scsi_all_devices | default([]) | selectattr('rotational', 'equalto', 1) | list }}"
@@ -567,16 +576,94 @@
 # Validate Discovery Output
 # ============================================================================
 
+# Failure path only. "Discovery produced 0 RAID arrays" has at least four
+# distinct causes that the old message could not tell apart, so an operator had
+# to go SSH the host to learn anything. Collect the real inventory instead.
+- name: Collect discovery diagnostics (only when discovery produced nothing)
+  ansible.builtin.shell:
+    executable: /bin/bash
+    cmd: |
+      set -uo pipefail
+      export LC_ALL=C LANG=C
+      echo "--- NVMe namespaces present (/sys/class/nvme) ---"
+      ls -1 /sys/class/nvme 2>/dev/null || echo "(none — no NVMe controllers)"
+      echo "--- lsblk ---"
+      lsblk -nrpo NAME,TYPE,SIZE,ROTA,MOUNTPOINT 2>&1 | head -40
+      echo "--- rotational flag per whole disk ---"
+      # Azure synthetic SCSI reports ROTA=1 for Premium SSD data disks, which
+      # is what makes `storage_type: ssd` silently drop them.
+      for d in /sys/block/*; do
+          n=$(basename "$d")
+          case "$n" in loop*|ram*|zram*|fd*|dm-*) continue ;; esac
+          printf '%s rotational=%s size=%s\n' \
+              "$n" "$(cat "$d/queue/rotational" 2>/dev/null || echo '?')" \
+              "$(cat "$d/size" 2>/dev/null || echo '?')"
+      done
+  register: _discovery_diag
+  changed_when: false
+  failed_when: false
+  check_mode: false
+  when:
+    - use_dynamic_discovery | default(true)
+    - use_raid | default(true)
+    - not _hw_raid_mode
+    - raid_arrays | default([]) | length == 0
+
 - name: Validate discovery produced RAID arrays
   ansible.builtin.assert:
     that:
       - raid_arrays is defined
       - raid_arrays | length > 0
     fail_msg: |
-      Discovery produced 0 RAID arrays. Check:
-      - storage_type is set correctly (current: {{ storage_type | default('nvme') }})
-      - Drives exist and are not excluded by boot device detection
-      - boot_device detected: {{ boot_device | default('unknown') }}
+      {%- set st = storage_type | default('nvme') -%}
+      {%- set pre = _scsi_prefilter | default([]) -%}
+      {%- set post = scsi_all_devices | default([]) -%}
+      Discovery produced 0 RAID arrays.
+
+      What discovery saw
+      ------------------
+        storage_type            : {{ storage_type | default('nvme') }}
+        boot device (excluded)  : {{ boot_device | default('unknown') }}
+        protected disks         : {{ _protected_disks | default([]) | join(', ') | default('(none)', true) }}
+        NVMe scan ran?          : {{ 'yes' if storage_type | default('nvme') in ['nvme', 'all'] else 'NO — storage_type does not include NVMe' }}
+        NVMe devices found      : {{ nvme_all_devices | default([]) | length }}
+        SCSI devices found      : {{ _scsi_prefilter | default([]) | length }}
+        ...surviving storage_type filter : {{ scsi_all_devices | default([]) | length }}
+        ...surviving exclusions          : {{ scsi_devices | default([]) | length }}
+        devices handed to RAID planning  : {{ nvme_devices | default([]) | length }}
+
+      Most likely cause
+      -----------------
+      {%- if st in ['ssd', 'hdd'] and pre | length > 0 and post | length == 0 %}
+        The storage_type filter dropped ALL {{ pre | length }} SCSI/SATA disk(s).
+        storage_type: {{ st }} keeps only rotational == {{ 1 if st == 'hdd' else 0 }},
+        and every disk reported the opposite. Azure synthetic SCSI commonly
+        reports rotational=1 even for Premium SSD, so `ssd` filters real data
+        disks out.
+        FIX: set `storage_type: scsi` in vars/main.yml — it scans /dev/sd*
+        with NO rotational filter. Rotational values are listed below.
+      {%- elif st not in ['nvme', 'all'] and post | length == 0 %}
+        storage_type: {{ st }} scans ONLY /dev/sd* — the NVMe discovery block
+        was skipped entirely. If this host's Tier 0 disks are local NVMe
+        (Azure HBv3/L-series, AWS i-series, most bare metal), they were never
+        looked at. Check the NVMe listing below.
+        FIX: set `storage_type: nvme` (NVMe only) or `all` (both) in vars/main.yml.
+      {%- elif (nvme_all_devices | default([]) | length) + (pre | length) == 0 %}
+        No candidate disks were detected at ALL, on either path. Either this
+        host has only its OS disk, or the disks are behind a controller the
+        sysfs scan does not walk. See the topology below.
+      {%- else %}
+        Candidate disks existed but every one was excluded. Check the protected
+        list above and any *_exclude_devices / _paths / _serials / _models set
+        in vars/main.yml.
+      {%- endif %}
+
+      Host storage topology
+      ---------------------
+      {{ _discovery_diag.stdout
+         if (_discovery_diag.stdout is defined
+             and _discovery_diag.stdout | length > 0)
+         else '<diagnostics not collected — the task was skipped>' }}
   when:
     - use_dynamic_discovery | default(true)
     - use_raid | default(true)
