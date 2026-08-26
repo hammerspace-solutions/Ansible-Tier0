@@ -1158,7 +1158,12 @@ storage_servers:
 
 When `use_dynamic_discovery: true`, the playbook automatically:
 
-1. **Detects boot device**: Uses `findmnt` to identify which NVMe contains the root filesystem
+1. **Detects boot device**: `roles/nvme_discovery/files/scan_disks.sh` resolves every
+   system mountpoint and active swap through its `MAJ:MIN` device number and walks the
+   sysfs topology (partition → parent disk, md/dm → `slaves/`) to the physical disks.
+   Resolving via `MAJ:MIN` rather than the mount `SOURCE` string is deliberate: a root
+   filesystem can report `SOURCE` as `/dev/root`, `/dev/sda2[/@]` (btrfs subvolume) or
+   an unevaluated `UUID=`, none of which are usable paths
 2. **Discovers NVMe devices**: Scans `/sys/class/nvme/` for all NVMe controllers
 3. **Applies exclusion rules**: Filters out boot device and user-specified exclusions
 4. **Groups by NUMA node**: Reads `/sys/class/nvme/nvmeX/device/numa_node` for each device

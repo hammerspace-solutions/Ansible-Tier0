@@ -243,16 +243,47 @@ Test cases:
 
 | # | Scenario | Expected behavior |
 |---|----------|-------------------|
-| 1 | Run `detect_boot_device.yml` against the actual control host | `_protected_disks` is non-empty; `_detected_boot_device` is in the list |
+| 1 | Run `detect_boot_device.yml` against the actual control host (via `include_role`, which the `script` module needs to resolve `files/`) | `_protected_disks` is non-empty; `_detected_boot_device` is in the list |
 | 2 | `_protected_disks: []` and `allow_empty_protected_disks: false` | Playbook hard-fails before any mkfs |
 | 3 | `_protected_disks: []` and `allow_empty_protected_disks: true` | Override bypasses the gate (diskless/netboot escape hatch) |
 | 4 | Boot drive sneaks into `nvme_devices` | Safety gate in `build_raid_arrays.yml` fires |
 | 5 | Clean `nvme_devices` with no overlap | Safety gate does NOT fire (no false positives) |
-| 6 | Detection under `LC_ALL=ko_KR.UTF-8` (Keith's host) | Same output as under `C` locale |
+| 6 | The real `files/scan_disks.sh` run under `LC_ALL=ko_KR.UTF-8` (Keith's host) | Still emits `PROTECTED` lines — the script pins `LC_ALL=C` internally |
+
+## `test_scan_disks.sh`
+
+Unit tests for `roles/nvme_discovery/files/scan_disks.sh`, the protected-disk
+resolver.
+
+Regression test for the **2026-08-26** Azure HBv3 failure: a normal host hard-
+stopped with `Boot / protected-disk detection returned an EMPTY list`. The old
+detection took `findmnt -n -o SOURCE <mp>` and gated on `[ -b "$src" ]`, so any
+mount whose `SOURCE` string is not a literal, existing block-device path was
+silently dropped — `/dev/root`, a btrfs `/dev/sda2[/@]` subvolume, an
+unevaluated `UUID=`. Every `SYSTEM_MOUNTS` entry dropped out, the list came back
+empty, and the boot-drive gate refused to run.
+
+The fix resolves through `MAJ:MIN` (which the kernel always reports) and walks
+the sysfs topology. These tests drive the production functions directly through
+the script's `--resolve-majmin` / `--walk` / `--path-to-name` hooks against a
+fake `SCAN_SYSROOT` tree, so **they run on macOS too** — only the final
+"real host scan" section self-skips on non-Linux.
+
+| Group | Cases | Expected behavior |
+|---|---|---|
+| `majmin_to_name` | `8:2`, `8:1`, `8:0`, `253:0`, `0:24`, empty, garbage, unknown | Real MAJ:MIN → kernel name even when the `SOURCE` string is unusable; major `0` (tmpfs/overlay/nfs) and junk → empty |
+| `walk_to_disks` | `sda2`, `sda`, `md127`, `dm-0`, missing, empty | partition → parent disk; md → members; LV → PV partition → disk; whole disk → itself |
+| `path_to_name` | `sda2[/@]`, plain node, `/dev/mapper/*` symlink, `UUID=`, `overlay`, missing | btrfs subvol suffix stripped, symlink chains followed, non-paths → empty |
+| real host scan (Linux only) | full script run | ≥1 `PROTECTED` line, a `ROOT` line, and **no** pseudo device (`zram*`/`ram*`/`loop*`/`fd*`) in `PROTECTED` — a pseudo device must never be able to satisfy the non-empty gate on its own |
+
+```bash
+bash tests/integration/test_scan_disks.sh
+```
 
 ## Running
 
-**Linux only** — uses `/proc/mounts`, `/proc/swaps`, `lsblk`, `findmnt`.
+**Linux only** (except `test_scan_disks.sh`, which runs anywhere) — uses
+`/proc/mounts`, `/proc/swaps`, `lsblk`, `findmnt`.
 On macOS the playbook self-skips at the first task. Run on the Korean-locale
 host that hit the original bug (`dskbd079`), inside CI, or any Linux dev box.
 

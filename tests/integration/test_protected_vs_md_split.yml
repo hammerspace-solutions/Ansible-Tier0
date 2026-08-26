@@ -273,7 +273,7 @@
     # ========================================================================
     # TEST 5: 2026-05-20 regression — /dev/mdN mounted at a DATA path
     # (/hammerspace/*) must NOT cause its members to be classified as
-    # protected. detect_boot_device.yml now restricts the mount-walk to a
+    # protected. scan_disks.sh now restricts the mount-walk to a
     # SYSTEM-mountpoint allow-list; this test simulates the shell output
     # under the old vs new behavior.
     # ========================================================================
@@ -344,16 +344,16 @@
     # would treat /dev/sdb as an ordinary unprotected /dev/sd* candidate.
     #
     # Two assertions:
-    #   a) the literal allow-list in detect_boot_device.yml still contains
+    #   a) the literal allow-list in files/scan_disks.sh still contains
     #      /mnt and /mnt/resource (audit — stops a silent removal), and
     #   b) with sdb resolved from /mnt, discovery keeps the real data disks
     #      and drops only boot + resource disk.
     # ========================================================================
     - name: 'TEST 6: Azure ephemeral resource disk (/mnt) is protected'
       block:
-        - name: Read the real detect_boot_device.yml allow-list
+        - name: Read the real scan_disks.sh allow-list
           ansible.builtin.slurp:
-            src: "{{ playbook_dir }}/../../roles/nvme_discovery/tasks/detect_boot_device.yml"
+            src: "{{ playbook_dir }}/../../roles/nvme_discovery/files/scan_disks.sh"
           register: _detect_src
 
         # regex_search over the whole blob rather than splitlines: inside a
@@ -374,7 +374,7 @@
             fail_msg: |
               REGRESSION: the Azure ephemeral resource disk mountpoints were
               removed from the SYSTEM_MOUNTS allow-list in
-              roles/nvme_discovery/tasks/detect_boot_device.yml. Without them a
+              roles/nvme_discovery/files/scan_disks.sh. Without them a
               storage_type: ssd|hdd run on Azure can mkfs/RAID /dev/sdb, the
               non-durable temp disk. Line found: {{ _system_mounts_line }}
 

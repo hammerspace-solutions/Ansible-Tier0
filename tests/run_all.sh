@@ -54,16 +54,31 @@ step "bash -n on all *.sh" bash_sweep
 
 # -- C: shellcheck (if available) --------------------------------------------
 if command -v shellcheck >/dev/null 2>&1; then
-    step "shellcheck (scripts/, tests/integration/*.sh)" \
-        shellcheck scripts/run.sh tests/integration/test_run_sh_locale.sh
+    step "shellcheck (scripts/, roles/*/files/, tests/integration/*.sh)" \
+        shellcheck scripts/run.sh \
+                   roles/nvme_discovery/files/scan_disks.sh \
+                   tests/integration/test_run_sh_locale.sh \
+                   tests/integration/test_scan_disks.sh
 else
     echo "skipping shellcheck (not installed)"
 fi
 
 # -- D: yamllint (if available) ----------------------------------------------
+# yamllint is frequently pip-installed without its console script on PATH
+# (Homebrew python, --user installs, venvs). Fall back to `python3 -m yamllint`
+# rather than silently skipping the step — a skipped check still prints
+# "All checks passed" at the end, which reads as coverage we did not have.
+YAMLLINT=""
 if command -v yamllint >/dev/null 2>&1; then
+    YAMLLINT="yamllint"
+elif python3 -m yamllint --version >/dev/null 2>&1; then
+    YAMLLINT="python3 -m yamllint"
+fi
+
+if [[ -n "${YAMLLINT}" ]]; then
+    # shellcheck disable=SC2086  # YAMLLINT is a command + optional args
     step "yamllint (plays/, scripts/, tests/, this-session role files)" \
-        yamllint plays/ scripts/ tests/integration/ \
+        ${YAMLLINT} plays/ scripts/ tests/integration/ \
                  roles/nvme_discovery/tasks/detect_boot_device.yml \
                  roles/raid_setup/tasks/main.yml \
                  roles/hammerspace_integration/tasks/azure_imds_az.yml \
@@ -104,6 +119,12 @@ step "Integration tests (boot-drive, RAID idempotency, protected-split)" integra
 # -- G: locale fallback unit tests -------------------------------------------
 step "Locale fallback unit tests (run.sh)" \
     bash tests/integration/test_run_sh_locale.sh
+
+# -- H: protected-disk resolver unit tests -----------------------------------
+# Fake-sysfs tests for scan_disks.sh. Runs on macOS too; the "real host scan"
+# section inside it self-skips on non-Linux.
+step "Protected-disk resolver unit tests (scan_disks.sh)" \
+    bash tests/integration/test_scan_disks.sh
 
 # -- Summary ------------------------------------------------------------------
 printf '\n=============================================\n'

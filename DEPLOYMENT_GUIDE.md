@@ -1119,14 +1119,15 @@ If you actually want to nuke the existing array and re-create with the original 
 
 1. `Boot / protected-disk detection returned an EMPTY list.`
    The playbook could not identify which disks are protected (host `/`, swap, mounted FS, md, or LVM). It will not proceed because running `mkfs` without that exclusion list could wipe the OS disk.
-   - **First, investigate.** Run on the target host:
+   - **First, read the failure message.** Since 2026-08-26 the task dumps the host's mount/swap/sysfs topology inline (`command -v` for findmnt/lsblk/pvs, `findmnt TARGET,SOURCE,MAJ:MIN,FSTYPE`, `/proc/self/mountinfo`, `/proc/swaps`, `/sys/class/block`, `lsblk`). That block is usually enough to diagnose without touching the host.
+   - **To reproduce by hand**, run the detection script directly on the target:
      ```bash
-     findmnt -n -o SOURCE /
-     cat /proc/mounts
+     bash roles/nvme_discovery/files/scan_disks.sh          # expect PROTECTED / ROOT lines
+     findmnt -n -o TARGET,SOURCE,MAJ:MIN,FSTYPE
      cat /proc/swaps
-     pvs --noheadings -o pv_name 2>/dev/null
+     ls -1 /sys/dev/block
      ```
-     One of these must return something non-empty. If they all return empty, the host is in a state the playbook cannot reason about — fix the host first.
+     Detection resolves each mountpoint through its `MAJ:MIN` number, so a `SOURCE` of `/dev/root`, `/dev/sda2[/@]` (btrfs subvolume) or `UUID=...` is fine — what matters is that `findmnt -o MAJ:MIN /` returns a non-zero major and that `/sys/dev/block/<maj>:<min>` exists. If those are empty, the host is in a state the playbook cannot reason about — fix the host first.
    - **Only on a genuinely diskless / netboot system** (no OS disk at all): set `allow_empty_protected_disks: true` in `vars/main.yml`.
 
 2. `REFUSING TO PROCEED — candidate storage devices overlap with protected disks.`

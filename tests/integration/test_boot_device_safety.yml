@@ -43,8 +43,13 @@
     # ========================================================================
     - name: 'TEST 1: run detect_boot_device.yml against this host'
       block:
+        # include_role (not include_tasks with a raw path): detect_boot_device.yml
+        # now runs roles/nvme_discovery/files/scan_disks.sh via the script module,
+        # and the script module only resolves files/ when the task has role context.
         - name: Include the actual detection task file
-          ansible.builtin.include_tasks: "{{ playbook_dir }}/../../roles/nvme_discovery/tasks/detect_boot_device.yml"
+          ansible.builtin.include_role:
+            name: nvme_discovery
+            tasks_from: detect_boot_device
 
         - name: 'TEST 1 ASSERT: _protected_disks is a non-empty list'
           ansible.builtin.assert:
@@ -55,7 +60,7 @@
             fail_msg: |
               REGRESSION: detection returned empty _protected_disks on a normal host.
               This is the exact failure mode that caused the boot-drive mkfs incident.
-              stdout was: {{ _protected_disks_raw.stdout | default('<unset>') }}
+              scan_disks.sh stdout was: {{ _disk_scan.stdout | default('<unset>') }}
             success_msg: "OK — detected {{ _protected_disks | length }} protected disk(s): {{ _protected_disks | join(', ') }}"
 
         - name: 'TEST 1 ASSERT: _detected_boot_device matches the disk hosting /'
@@ -225,22 +230,9 @@
     # ========================================================================
     - name: 'TEST 6: detection works under ko_KR.UTF-8 locale'
       block:
-        - name: Re-run detection with ko_KR.UTF-8 forced (simulates Keith's host)
-          ansible.builtin.shell:
-            executable: /bin/bash
-            cmd: |
-              set -uo pipefail
-              export LC_ALL=C LANG=C
-              {
-                  awk '/^\/dev\// {print $1}' /proc/mounts | while read -r dev; do
-                      [ -b "$dev" ] || continue
-                      lsblk -nrpso NAME,TYPE "$dev" 2>/dev/null | awk '$2 == "disk" {print $1}'
-                  done
-                  awk 'NR>1 && $1 ~ /^\/dev\// {print $1}' /proc/swaps | while read -r dev; do
-                      [ -b "$dev" ] || continue
-                      lsblk -nrpso NAME,TYPE "$dev" 2>/dev/null | awk '$2 == "disk" {print $1}'
-                  done
-              } | xargs -n1 basename 2>/dev/null | sort -u | grep -v '^$' || true
+        - name: Re-run the real scan_disks.sh with ko_KR.UTF-8 forced
+          ansible.builtin.script:
+            cmd: "{{ playbook_dir }}/../../roles/nvme_discovery/files/scan_disks.sh"
           environment:
             LC_ALL: ko_KR.UTF-8
             LANG: ko_KR.UTF-8
@@ -250,11 +242,11 @@
         - name: 'TEST 6 ASSERT: detection under ko_KR locale produces same output'
           ansible.builtin.assert:
             that:
-              - _ko_detect.stdout_lines | length > 0
+              - _ko_detect.stdout_lines | select('match', '^PROTECTED ') | list | length > 0
             fail_msg: |
-              Detection under ko_KR.UTF-8 returned empty.
+              Detection under ko_KR.UTF-8 returned no PROTECTED lines.
               Probable cause: the script is not forcing LC_ALL=C internally,
-              so a non-UTF-8 system locale breaks parsing of lsblk/findmnt/awk.
+              so a non-UTF-8 system locale breaks parsing of findmnt/pvs/awk.
 
         - name: 'TEST 6 PASS: detection is locale-resilient'
           ansible.builtin.set_fact:
