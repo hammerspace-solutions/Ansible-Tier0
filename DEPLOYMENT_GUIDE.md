@@ -1119,7 +1119,8 @@ If you actually want to nuke the existing array and re-create with the original 
 
 1. `Boot / protected-disk detection returned an EMPTY list.`
    The playbook could not identify which disks are protected (host `/`, swap, mounted FS, md, or LVM). It will not proceed because running `mkfs` without that exclusion list could wipe the OS disk.
-   - **First, read the failure message.** Since 2026-08-26 the task dumps the host's mount/swap/sysfs topology inline (`command -v` for findmnt/lsblk/pvs, `findmnt TARGET,SOURCE,MAJ:MIN,FSTYPE`, `/proc/self/mountinfo`, `/proc/swaps`, `/sys/class/block`, `lsblk`). That block is usually enough to diagnose without touching the host.
+   - **Were you running `--check`?** This was the cause of the 2026-08-26 report. `command`/`shell`/`script` do not support check mode, so Ansible skips them; before the fix that meant every detection task was skipped, all four lists came back empty, and the gate aborted the dry run on a *simulated* empty result. Tell-tale signature: all four lists show `(none)`, `Primary boot disk` is blank, and the recap shows changes (`changed=4`) even though nothing was applied. The read-only detection tasks now carry `check_mode: false`, so `--check` works — if you are on an older checkout, either update or drop `--check`.
+   - **Then read the failure message.** Since 2026-08-26 the task dumps the host's mount/swap/sysfs topology inline (`command -v` for findmnt/lsblk/pvs, `findmnt TARGET,SOURCE,MAJ:MIN,FSTYPE`, `/proc/self/mountinfo`, `/proc/swaps`, `/sys/class/block`, `lsblk`). That block is usually enough to diagnose without touching the host.
    - **To reproduce by hand**, run the detection script directly on the target:
      ```bash
      bash roles/nvme_discovery/files/scan_disks.sh          # expect PROTECTED / ROOT lines

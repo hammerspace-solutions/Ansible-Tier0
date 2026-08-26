@@ -25,11 +25,24 @@
 # Hard-fails if _protected_disks is empty (defense-in-depth against the
 # 2026-05-14 boot-drive incident).
 
+# check_mode: false is LOAD-BEARING, not an optimisation.
+#
+# command/shell/script do not support check mode, so under `--check` Ansible
+# SKIPS them. A skipped task still registers its variable — as {skipped: true}
+# with no stdout — so `_disk_scan.stdout_lines | default([])` quietly yields []
+# and every classification list comes back empty. The boot-drive gate below
+# then fires on a SIMULATED empty result and aborts the dry run, which is
+# exactly the 2026-08-26 report: `ok=28 changed=4`, all four lists `(none)`,
+# and `/proc/mounts entries: 12` (facts DO gather under --check).
+#
+# This task only reads /sys, /proc, findmnt and pvs — it has no side effects,
+# so running it for real during a dry run is both safe and necessary.
 - name: Scan and classify block devices (protected / md member / LVM PV / root)
   ansible.builtin.script:
     cmd: scan_disks.sh
   register: _disk_scan
   changed_when: false
+  check_mode: false
 
 - name: Set protected / md-member / LVM facts
   ansible.builtin.set_fact:
@@ -97,6 +110,7 @@
   register: _boot_detect_diag
   changed_when: false
   failed_when: false
+  check_mode: false
   when: _protected_disks | length == 0
 
 - name: FAIL if no protected disks were detected (refusing to risk the boot drive)
@@ -108,13 +122,15 @@
       the OS disk.
 
       scan_disks.sh stdout:
-      {{ _disk_scan.stdout | default('<empty>') }}
+      {{ _disk_scan.stdout | default('', true) | trim | default('<empty>', true) }}
       scan_disks.sh stderr:
-      {{ _disk_scan.stderr | default('<empty>') }}
+      {{ _disk_scan.stderr | default('', true) | trim | default('<empty>', true) }}
 
       Host topology at time of failure:
-      {{ _boot_detect_diag.stdout if _boot_detect_diag.stdout is defined
-         else '<diagnostics not collected>' }}
+      {{ _boot_detect_diag.stdout
+         if (_boot_detect_diag.stdout is defined
+             and _boot_detect_diag.stdout | length > 0)
+         else '<diagnostics not collected — the task was skipped>' }}
 
       If you are intentionally provisioning a diskless / netboot system,
       set allow_empty_protected_disks: true in vars/main.yml (NOT recommended).

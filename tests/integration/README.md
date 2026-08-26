@@ -280,6 +280,46 @@ fake `SCAN_SYSROOT` tree, so **they run on macOS too** — only the final
 bash tests/integration/test_scan_disks.sh
 ```
 
+## `test_check_mode_detection.yml`
+
+Regression test for the **2026-08-26** dry-run failure: `site.yml --check`
+aborted at the boot-drive gate with all four classification lists `(none)` and
+`ok=28 changed=4 failed=1`.
+
+`command` / `shell` / `script` do not support check mode, so under `--check`
+Ansible **skips** them. Every detection task was skipped, each registered
+variable came back without usable output, all lists resolved to `[]`, and the
+safety gate — which exists to catch a *real* empty result — fired on a
+*simulated* one. The playbook could not be dry-run at all.
+
+Fix: `check_mode: false` on the read-only detection tasks (they only read
+`/sys`, `/proc`, `findmnt`, `pvs`, `lscpu`), matching the idiom already used in
+`roles/di/` and `roles/filesystem_setup/`.
+
+The test also pins down a second trap. **The two kinds of skip register
+different shapes:**
+
+| Skip kind | Registered result | `result.stdout is defined` |
+|---|---|---|
+| `when`-skipped | `{skipped: true, changed: false}` | **false** |
+| check-mode-skipped | `{skipped: true, stdout: '', rc: 0, …}` | **true**, but empty |
+
+So the project's standing `result.attr is defined` guard (from the 2026-07-21
+sunrpc incident) is necessary but **not sufficient** for check-mode skips — the
+key exists, the guard passes, and the fallback never fires. That is why the
+failure message's diagnostics block rendered as a blank line and the report
+could not be diagnosed from the log. Guard with length, not just definedness.
+
+| # | Scenario | Expected behavior |
+|---|----------|-------------------|
+| 1 | Both skip shapes, `is defined` vs length-aware guard | `is defined` alone misses the check-mode shape; the length-aware guard handles both |
+| 2 | **Audit:** `check_mode: false` count per discovery file | `detect_boot_device.yml` = 2, `cpu_optimization.yml` = 5, `main.yml` ≥ 2 |
+| 3 | Real `scan_disks.sh` run with `check_mode: false` (Linux only) | Task is **not** skipped and emits `PROTECTED` lines |
+
+```bash
+ansible-playbook tests/integration/test_check_mode_detection.yml -i localhost, -c local
+```
+
 ## Running
 
 **Linux only** (except `test_scan_disks.sh`, which runs anywhere) — uses

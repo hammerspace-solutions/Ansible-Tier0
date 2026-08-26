@@ -228,6 +228,10 @@
           fi
       register: nvme_numa_raw
       changed_when: false
+      # Read-only sysfs/lsblk scan. Without this, `--check` skips the task and
+      # nvme_devices comes back empty, which trips "Discovery produced 0 RAID
+      # arrays" further down and makes the playbook impossible to dry-run.
+      check_mode: false
 
     - name: Initialize excluded devices list
       ansible.builtin.set_fact:
@@ -349,6 +353,8 @@
           done
       register: scsi_raw
       changed_when: false
+      # Read-only sysfs scan — see the note on nvme_numa_raw above.
+      check_mode: false
 
     - name: Build SCSI device list with full info
       ansible.builtin.set_fact:
