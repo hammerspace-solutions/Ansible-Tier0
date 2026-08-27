@@ -384,7 +384,80 @@ drops hosts with no error and `storage_servers` simply comes back empty. Set
 `strict: true` in the inventory to turn those into hard errors while you are
 getting the expression right.
 
-### 4.5 Test Inventory Discovery
+### 4.5 Scale Sets (VMSS)
+
+Relevant if the Tier 0 nodes are provisioned as a scale set — the normal case
+for CycleCloud/HPC execute nodes.
+
+**Scale-set instances are not fetched by default.** `include_vm_resource_groups`
+returns **standalone VMs only**; VMSS fetch is a separate option that defaults
+to off. If `az vmss list` shows nodes that never appear in
+`ansible-inventory --list`, this is why:
+
+```yaml
+include_vmss_resource_groups:
+  - '*'          # every resource group, or list specific ones
+```
+
+**Check your orchestration mode first** — it changes what appears where:
+
+```bash
+az vmss list -g <rg> --query "[].{name:name, mode:orchestrationMode}" -o table
+```
+
+| Mode | Behaviour |
+|------|-----------|
+| **Uniform** | Instances are not standalone VM resources. They appear **only** via `include_vmss_resource_groups`. |
+| **Flexible** | Instances **are** standard VM resources, so they may appear via `include_vm_resource_groups` too. Enabling both can surface the same node twice under different names. |
+
+**Filtering on scale-set membership.** The `vmss` hostvar is a dict
+`{id, name}` for a scale-set instance and an **empty dict `{}`** for a
+standalone VM — so it is *always defined*. Test its length; `vmss is defined`
+is true for both and silently matches everything:
+
+| Intent | Expression |
+|--------|-----------|
+| Only scale-set instances | `vmss \| default({}) \| length > 0` |
+| Only standalone VMs | `vmss \| default({}) \| length == 0` |
+| One named scale set | `(vmss \| default({})).get('name', '') == 'execute'` |
+| Scale set **and** SKU | `(vmss \| default({})).get('name', '') == 'execute' and virtual_machine_size \| default('') == 'Standard_L16s_v3'` |
+
+`resource_type` is an independent second signal, handy for cross-checking:
+`Microsoft.Compute/virtualMachines` versus
+`Microsoft.Compute/virtualMachineScaleSets/virtualMachines`.
+
+Putting it together — Tier 0 nodes are the `L16s_v3` members of the `tier0`
+scale set, and nothing else in the resource group qualifies:
+
+```yaml
+include_vm_resource_groups:
+  - tier0-rg
+include_vmss_resource_groups:
+  - tier0-rg
+
+conditional_groups:
+  storage_servers: >-
+    (vmss | default({})).get('name', '') == 'tier0' and
+    virtual_machine_size | default('') == 'Standard_L16s_v3'
+```
+
+The inventory also groups by scale set via `keyed_groups`, giving
+`vmss_<name>` (and `vmss_standalone` for non-VMSS VMs), so you can target one
+scale set directly:
+
+```bash
+ansible-playbook site.yml -i inventory.azure.yml --limit vmss_tier0
+```
+
+> **Scale sets and Tier 0 are an awkward fit.** Scale sets exist to make
+> instances disposable and interchangeable; Tier 0 nodes hold RAIDed local
+> NVMe registered as named Hammerspace volumes. A scale-in event destroys a
+> registered storage node and its data. If the Tier 0 nodes are in a scale
+> set, disable autoscale on it, or accept that recovery means re-running the
+> deployment and cleaning the orphaned volumes out of Hammerspace with
+> `cleanup_instance_nodes.py`.
+
+### 4.6 Test Inventory Discovery
 
 ```bash
 # List all discovered hosts

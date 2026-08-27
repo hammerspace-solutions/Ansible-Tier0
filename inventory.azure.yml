@@ -27,8 +27,28 @@ plugin: azure.azcollection.azure_rm
 
 # Which resource groups to pull VMs from - REQUIRED: update for your environment.
 # Remove this key entirely to scan the whole subscription (slower).
+#
+# Fetches STANDALONE VMs ONLY. Scale-set instances are NOT returned by this
+# option — VMSS fetch is off by default and needs include_vmss_resource_groups
+# below. If nodes are missing here but `az vmss list` shows them, that is why.
 include_vm_resource_groups:
   - tier0-rg
+
+# Scale Sets (VMSS). Defaults to NO VMSS FETCH AT ALL. Uncomment to include
+# them: '*' scans every resource group, or list specific groups. Relevant for
+# CycleCloud/HPC, which provisions execute nodes as scale sets.
+#
+# include_vmss_resource_groups:
+#   - '*'
+#
+# Uniform vs Flexible orchestration matters here:
+#   Uniform  - instances are not standalone VM resources; they appear ONLY
+#              via include_vmss_resource_groups
+#   Flexible - instances ARE standard VM resources and may ALSO appear via
+#              include_vm_resource_groups, so enabling both can surface the
+#              same node twice under different names
+# Check which you have:
+#   az vmss list -g <rg> --query "[].{name:name, mode:orchestrationMode}" -o table
 
 # Use the bare VM name as the Ansible inventory hostname instead of the
 # default "name_(resourcegroup)" form. Keeps hostnames matching the
@@ -98,6 +118,29 @@ conditional_groups:
 #     tags.role | default('') == 'tier0' and
 #     virtual_machine_size | default('') | regex_search('^Standard_L')
 
+# Filtering on scale-set membership
+# ---------------------------------
+# The `vmss` hostvar is {id, name} for a scale-set instance and an EMPTY DICT
+# {} for a standalone VM. It is therefore ALWAYS defined — test its length,
+# never `is defined`, which is true for both and silently matches everything:
+#
+#   only scale-set instances   vmss | default({}) | length > 0
+#   only standalone VMs        vmss | default({}) | length == 0
+#   one named scale set        (vmss | default({})).get('name', '') == 'execute'
+#   scale set AND SKU          (vmss | default({})).get('name', '') == 'execute'
+#                                and virtual_machine_size | default('') == 'Standard_L16s_v3'
+#
+# `resource_type` is an independent second signal, useful as a cross-check:
+#   standalone  Microsoft.Compute/virtualMachines
+#   scale set   Microsoft.Compute/virtualMachineScaleSets/virtualMachines
+#
+# Example — Tier 0 nodes are the L16s_v3 members of the 'tier0' scale set:
+#
+#   conditional_groups:
+#     storage_servers: >-
+#       (vmss | default({})).get('name', '') == 'tier0' and
+#       virtual_machine_size | default('') == 'Standard_L16s_v3'
+
 # conditional_groups expressions fail SILENTLY by default — a typo drops hosts
 # with no error, and storage_servers just comes back empty. Set strict: true
 # while debugging to turn those into hard errors.
@@ -126,6 +169,10 @@ keyed_groups:
     prefix: size
   - key: location | default('unknown', true)
     prefix: loc
+  # Scale-set membership: vmss_<scaleset-name>, or vmss_standalone for
+  # non-VMSS VMs. Enables `--limit vmss_tier0`.
+  - key: (vmss | default({})).get('name', 'standalone')
+    prefix: vmss
 
 # Cache the API results - Azure inventory calls are slow on large subscriptions.
 cache: true
