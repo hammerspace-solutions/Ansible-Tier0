@@ -1,6 +1,43 @@
 ---
 # RAID setup role - main tasks
 
+# raid_arrays must be a list of dicts, each with name/device/level/drives.
+# Anything else used to surface as a raw Jinja error from a `subelements` loop
+# further down — "obj must be a list of dicts or a nested dict" — which names
+# neither the variable nor the file. Worse, that error fires while Ansible is
+# BUILDING the loop, which happens BEFORE `when` is evaluated, so it escapes
+# even a role-level gate: a host in existing-mount mode, where raid_setup is
+# skipped entirely, still died on it (2026-08-27).
+- name: Validate raid_arrays shape
+  ansible.builtin.fail:
+    msg: |
+      raid_arrays is malformed.
+
+      Expected a list of dicts:
+
+        raid_arrays:
+          - name: md0
+            device: /dev/md0
+            level: 0
+            drives: [/dev/nvme0n1, /dev/nvme1n1]
+
+      Got: {{ raid_arrays }}
+
+      {% if raid_arrays | select('mapping') | list | length == 0 %}
+      None of the entries are dicts — this looks like a list of device paths.
+      A bare device list belongs in `hw_raid_devices` (with use_raid: false),
+      or, if the filesystem is already built and mounted, in
+      `existing_mount_paths`. Comment `raid_arrays` out in vars/main.yml.
+      {% else %}
+      Entries missing a 'drives' key:
+      {{ raid_arrays | select('mapping') | rejectattr('drives', 'defined') | list }}
+      {% endif %}
+  when:
+    - raid_arrays is defined
+    - raid_arrays | length > 0
+    - (raid_arrays | select('mapping') | selectattr('drives', 'defined') | list | length)
+      != (raid_arrays | length)
+
 - name: Include OS-specific variables
   ansible.builtin.include_vars: "{{ item }}"
   with_first_found:
@@ -58,7 +95,11 @@
           fi
       done
       echo "${found}"
-  loop: "{{ raid_arrays }}"
+  # Filtered, not bare: loop AND loop_control.label are templated even when
+  # the task is skipped, so a malformed entry (a bare device string) breaks
+  # `item.name` / `item.drives` through a role-level gate.
+  loop: "{{ raid_arrays | default([]) | select('mapping')
+            | selectattr('drives', 'defined') | list }}"
   loop_control:
     label: "{{ item.name }}"
   register: _array_md_lookup
@@ -122,7 +163,11 @@
       {{ (raid_arrays | rejectattr('name', 'equalto', item.name) | list)
          + [ item | combine({'device': _device_remap[item.device]
                               | default(item.device)}) ] }}
-  loop: "{{ raid_arrays }}"
+  # Filtered, not bare: loop AND loop_control.label are templated even when
+  # the task is skipped, so a malformed entry (a bare device string) breaks
+  # `item.name` / `item.drives` through a role-level gate.
+  loop: "{{ raid_arrays | default([]) | select('mapping')
+            | selectattr('drives', 'defined') | list }}"
   loop_control:
     label: "{{ item.name }}"
   when:
@@ -146,7 +191,13 @@
 - name: Verify drives exist before creating RAID
   ansible.builtin.stat:
     path: "{{ item.1 }}"
-  loop: "{{ raid_arrays | subelements('drives') }}"
+  # Total expression — see the validation task above for why this must never
+  # raise. A malformed raid_arrays makes `subelements` throw while Ansible is
+  # BUILDING the loop, which happens BEFORE `when` is applied — so a role-level
+  # gate does NOT protect this task. select('mapping') drops non-dict entries
+  # and selectattr drops dicts with no 'drives' key.
+  loop: "{{ raid_arrays | default([]) | select('mapping')
+            | selectattr('drives', 'defined') | list | subelements('drives') }}"
   loop_control:
     label: "{{ item.1 }}"
   register: drive_checks
@@ -161,7 +212,13 @@
 
 - name: Check if drives are already in use
   ansible.builtin.command: "lsblk -no TYPE {{ item.1 }}"
-  loop: "{{ raid_arrays | subelements('drives') }}"
+  # Total expression — see the validation task above for why this must never
+  # raise. A malformed raid_arrays makes `subelements` throw while Ansible is
+  # BUILDING the loop, which happens BEFORE `when` is applied — so a role-level
+  # gate does NOT protect this task. select('mapping') drops non-dict entries
+  # and selectattr drops dicts with no 'drives' key.
+  loop: "{{ raid_arrays | default([]) | select('mapping')
+            | selectattr('drives', 'defined') | list | subelements('drives') }}"
   loop_control:
     label: "{{ item.1 }}"
   register: drive_usage
@@ -184,7 +241,11 @@
     {% if raid_chunk_size is defined and item.level in [0, 5, 6, 10] %}--chunk={{ raid_chunk_size }}{% endif %}
     {{ item.drives | join(' ') }}
     --run
-  loop: "{{ raid_arrays }}"
+  # Filtered, not bare: loop AND loop_control.label are templated even when
+  # the task is skipped, so a malformed entry (a bare device string) breaks
+  # `item.name` / `item.drives` through a role-level gate.
+  loop: "{{ raid_arrays | default([]) | select('mapping')
+            | selectattr('drives', 'defined') | list }}"
   loop_control:
     label: "{{ item.name }}"
   when:

@@ -62,8 +62,12 @@
     - name: Verify we have the required variables (skip if using dynamic discovery, HW RAID, or manual mount_points)
       ansible.builtin.assert:
         that:
-          - raid_arrays is defined or individual_drives is defined or use_dynamic_discovery | default(false) or hw_raid_devices is defined or mount_points is defined
-          - nfs_exports is defined or use_dynamic_discovery | default(false) or hw_raid_devices is defined or mount_points is defined
+          - raid_arrays is defined or individual_drives is defined or use_dynamic_discovery | default(false)
+            or hw_raid_devices is defined or mount_points is defined
+            or existing_mount_paths | default([]) | length > 0
+          - nfs_exports is defined or use_dynamic_discovery | default(false)
+            or hw_raid_devices is defined or mount_points is defined
+            or existing_mount_paths | default([]) | length > 0
         fail_msg: "Required variables are not defined. Check vars/main.yml or enable use_dynamic_discovery"
 
     # =========================================================================
