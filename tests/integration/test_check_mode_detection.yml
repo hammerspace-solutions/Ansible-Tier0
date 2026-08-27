@@ -164,6 +164,40 @@
               "Discovery produced 0 RAID arrays".
               Found: {{ _audit | selectattr('file', 'equalto', 'main.yml') | list }}
 
+        # cab3ef3 moved detection to the `script` module, which resolves files/
+        # from the ROLE CONTEXT of the including task. A raw-path
+        # `include_tasks: ../nvme_discovery/tasks/detect_boot_device.yml` from
+        # another role leaves that context pointing at the WRONG role, and the
+        # script is searched for in <that role>/files/ — a hard failure. This
+        # actually shipped in precheck and would have broken the next run that
+        # got past discovery.
+        - name: 'TEST 2 ASSERT: no role raw-path includes of another role''s tasks'
+          ansible.builtin.assert:
+            that:
+              - _cross_role_includes | length == 0
+            fail_msg: |
+              REGRESSION: {{ _cross_role_includes | length }} cross-role
+              raw-path include(s) found. detect_boot_device.yml runs
+              `script: scan_disks.sh`, which only resolves with its OWN role's
+              context — use `include_role` + `tasks_from:` instead:
+              {{ _cross_role_includes | join('\n') }}
+          vars:
+            # [.][.] rather than \.\. so the pattern survives YAML + Jinja +
+            # shell quoting without a stack of backslashes. Covers BOTH
+            # include_tasks and import_tasks, both the ../<role>/tasks/ and
+            # roles/<role>/tasks/ spellings, across roles/, plays/ and the
+            # tests themselves. The trailing grep -v drops commented-out
+            # examples — this very file documents the bad form in a comment.
+            _audit_cmd: >-
+              cd {{ (playbook_dir ~ '/../..') | quote }} &&
+              grep -rnE
+              "(include_tasks|import_tasks):.*([.][.]/[a-z_]*|roles/[a-z_]*)/tasks/"
+              roles/ plays/ tests/integration/
+              | grep -v ":[0-9]*: *#" || true
+            _cross_role_includes: >-
+              {{ lookup('ansible.builtin.pipe', _audit_cmd)
+                 | split('\n') | reject('equalto', '') | list }}
+
         - name: Record TEST 2 pass
           ansible.builtin.set_fact:
             _test_passes: "{{ _test_passes + ['TEST 2: audit — all read-only detection tasks carry check_mode: false'] }}"

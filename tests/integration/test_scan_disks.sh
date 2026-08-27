@@ -59,7 +59,7 @@ build_fake_sys() {
 
     # Whole disks
     local disk
-    for disk in sda sdb sdc sdd zram0; do
+    for disk in sda sdb sdc sdd zram0 nvme0n1; do
         mkdir -p "${d}/devices/virtual/block/${disk}"
         ln -s "../../devices/virtual/block/${disk}" "${d}/class/block/${disk}"
     done
@@ -92,6 +92,7 @@ build_fake_sys() {
     ln -s "../../devices/virtual/block/sda/sda2" "${d}/dev/block/8:2"
     ln -s "../../devices/virtual/block/md127"    "${d}/dev/block/9:127"
     ln -s "../../devices/virtual/block/dm-0"     "${d}/dev/block/253:0"
+    ln -s "../../devices/virtual/block/nvme0n1"  "${d}/dev/block/259:0"
 }
 
 build_fake_dev() {
@@ -104,8 +105,33 @@ build_fake_dev() {
     ln -s "../dm-0" "${d}/mapper/rootvg-lv_root"
 }
 
+# Fake /proc. mountinfo field 3 is MAJ:MIN and field 5 is the mountpoint —
+# the same fallback scan_disks.sh uses when findmnt is unavailable. Because
+# SCAN_PROCROOT is overridden, the script skips findmnt entirely (findmnt would
+# answer about the REAL host), so these tests exercise the resolver against the
+# fixture on Linux and macOS alike.
+#
+# Layout mirrors the reported Azure HB120rs_v3:
+#   sda2 -> /        sda1 -> /boot/efi     (OS disk, critical)
+#   sdd2 -> /var                           (critical via /var)
+#   nvme0n1 -> /tmp and /nvme              (CycleCloud scratch, releasable)
+build_fake_proc() {
+    local d="${FAKE}/proc"
+    mkdir -p "${d}/self"
+    cat > "${d}/self/mountinfo" <<'EOF'
+25 1 8:2 / / rw,relatime shared:1 - ext4 /dev/root rw
+26 25 8:1 / /boot/efi rw,relatime shared:2 - vfat /dev/sda1 rw
+27 25 253:0 / /var rw,relatime shared:3 - xfs /dev/mapper/vg-var rw
+28 25 259:0 / /tmp rw,relatime shared:4 - xfs /dev/nvme0n1 rw
+29 25 259:0 / /nvme rw,relatime shared:5 - xfs /dev/nvme0n1 rw
+30 25 0:24 / /dev/shm rw,relatime shared:6 - tmpfs tmpfs rw
+EOF
+    printf 'Filename\t\t\t\tType\t\tSize\tUsed\tPriority\n' > "${d}/swaps"
+}
+
 build_fake_sys
 build_fake_dev
+build_fake_proc
 
 run() {
     SCAN_SYSROOT="${FAKE}/sys" SCAN_DEVROOT="${FAKE}/dev" \
@@ -140,6 +166,35 @@ check "/dev/mapper symlink is followed"    "dm-0" "$(run --path-to-name "${FAKE}
 check "UUID= source -> empty"              ""     "$(run --path-to-name 'UUID=1234-abcd')"
 check "overlay -> empty"                   ""     "$(run --path-to-name 'overlay')"
 check "missing node -> empty"              ""     "$(run --path-to-name "${FAKE}/dev/sdz9")"
+
+printf '\n--- --disk-for-mount (release planning) ---\n'
+# The reported case: CycleCloud mounts the local NVMe at /tmp and /nvme.
+check "/tmp  -> nvme0n1 (CycleCloud scratch)"  "nvme0n1" "$(run --disk-for-mount /tmp)"
+check "/nvme -> nvme0n1 (same disk, 2nd mount)" "nvme0n1" "$(run --disk-for-mount /nvme)"
+check "/     -> sda (OS disk)"                  "sda"     "$(run --disk-for-mount /)"
+check "/var  -> sdd (via dm-0 -> sdd2)"         "sdd"     "$(run --disk-for-mount /var)"
+check "/dev/shm -> empty (tmpfs, major 0)"      ""        "$(run --disk-for-mount /dev/shm)"
+check "unmounted path -> empty"                 ""        "$(run --disk-for-mount /not/mounted)"
+
+printf '\n--- --critical-disks (the refuse-list) ---\n'
+critical="$(run --critical-disks)"
+check "critical set is exactly sda + sdd" $'sda\nsdd' "${critical}"
+# THE point of the feature: the scratch NVMe must NOT be critical, or it could
+# never be released; the OS disk MUST be, or releasing /tmp could expose it.
+if grep -qx 'nvme0n1' <<< "${critical}"; then
+    printf '  ✗ nvme0n1 wrongly listed critical — /tmp could never be released\n'
+    fail=$((fail + 1))
+else
+    printf '  ✓ nvme0n1 is NOT critical (so /tmp is releasable by name)\n'
+    pass=$((pass + 1))
+fi
+if grep -qx 'sda' <<< "${critical}"; then
+    printf '  ✓ sda IS critical (release of any mount on it is refused)\n'
+    pass=$((pass + 1))
+else
+    printf '  ✗ sda missing from critical set — OS disk could be released\n'
+    fail=$((fail + 1))
+fi
 
 printf '\n--- real host scan ---\n'
 if [[ "$(uname -s)" == "Linux" ]]; then

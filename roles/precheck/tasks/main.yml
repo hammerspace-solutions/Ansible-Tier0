@@ -30,13 +30,23 @@
 # Hardware RAID Detection
 # ============================================================================
 
-- name: Set hardware RAID mode for precheck
+# True whenever this host brings its own storage rather than having it
+# discovered: hardware RAID devices, or already-mounted filesystems. In both
+# cases the drive / NUMA / sector-size checks below are meaningless — there are
+# no candidate drives to validate.
+- name: Set pre-provisioned storage mode for precheck
   ansible.builtin.set_fact:
-    _precheck_hw_raid: "{{ (hw_raid_devices is defined and hw_raid_devices | length > 0 and not (use_raid | default(true))) | bool }}"
+    _precheck_hw_raid: >-
+      {{ ((hw_raid_devices is defined and hw_raid_devices | length > 0
+           and not (use_raid | default(true)))
+          or (existing_mount_paths | default([]) | length > 0)) | bool }}
 
-- name: Display hardware RAID precheck mode
+- name: Display pre-provisioned storage precheck mode
   ansible.builtin.debug:
-    msg: "Hardware RAID mode detected - skipping drive discovery, NUMA, and sector size checks"
+    msg: >-
+      {{ 'Existing-mount mode' if (existing_mount_paths | default([]) | length > 0)
+         else 'Hardware RAID mode' }} detected —
+      skipping drive discovery, NUMA, and sector size checks
   when: _precheck_hw_raid
 
 # ============================================================================

@@ -63,6 +63,17 @@
   failed_when: false
 
 # ============================================================================
+# Release cloud-provisioned scratch mounts (opt-in, default off)
+#
+# Must run BEFORE both the HW RAID block and detect_boot_device.yml: a disk
+# that is still mounted at /tmp is classified PROTECTED, and one that is still
+# mounted at all cannot be mkfs'd. See the task file for the safety model.
+# ============================================================================
+- name: Release ephemeral cloud mounts before discovery
+  ansible.builtin.include_tasks: release_ephemeral_mounts.yml
+  when: release_ephemeral_mountpoints | default([]) | length > 0
+
+# ============================================================================
 # Hardware RAID Mode - Skip discovery, use pre-defined HW RAID devices
 # ============================================================================
 - name: Handle hardware RAID devices (skip software RAID)

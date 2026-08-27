@@ -69,6 +69,84 @@ xfs_agcount: 512
 storage_type: "nvme"
 
 # ============================================================================
+# Releasing cloud-provisioned scratch mounts (OPT-IN, default off)
+# ============================================================================
+# Azure — CycleCloud especially — auto-mounts local NVMe as scratch. On an
+# HB120rs_v3 the 894 GB local NVMe comes up as:
+#
+#   nvme0n1  259:0  0  894.3G  0 disk  /tmp
+#                                      /nvme
+#
+# /tmp is a SYSTEM mountpoint, so protected-disk detection correctly classifies
+# nvme0n1 as untouchable and discovery reports "0 RAID arrays". The disk is
+# genuinely in use — mkfs would fail EBUSY regardless.
+#
+# Listing a mountpoint here unmounts it and removes its /etc/fstab entry before
+# discovery runs, so the disk becomes an ordinary Tier 0 candidate. Nothing is
+# reformatted by this step; the normal safety gates still apply afterwards.
+#
+# Typical Azure / CycleCloud value:
+#   release_ephemeral_mountpoints:
+#     - /tmp
+#     - /nvme
+#
+# HARD REFUSE-LIST (cannot be overridden): any mountpoint whose disk also backs
+# /, /boot, /boot/efi, /usr, /var, /etc, /home or ACTIVE SWAP is rejected.
+#
+# CAVEAT: /tmp is almost always busy on a running system, so its unmount will
+# usually fail the first time. The fstab entry is removed regardless, so the
+# fix is to reboot the node and re-run. A lazy unmount is deliberately NOT
+# used — it reports success while the filesystem is still referenced.
+#
+# Leave empty to disable entirely.
+release_ephemeral_mountpoints: []
+
+# ============================================================================
+# Existing-mount mode — use filesystems that are ALREADY built and mounted
+# ============================================================================
+# Alternative to discovery + RAID + mkfs. Point Tier 0 at filesystems that are
+# already mounted — an md array you assembled yourself, a previous deployment,
+# a SAN LUN — and the playbook creates ONE export directory inside each and
+# wires up NFS + Hammerspace around it.
+#
+# In this mode the playbook does NOT: discover disks, run mdadm, run mkfs,
+# touch /etc/fstab, or mount/unmount anything. filesystem_setup is skipped
+# entirely. The only write to disk is `mkdir` of the export directory.
+#
+# Two accepted entry shapes:
+#
+#   existing_mount_paths:
+#     - /mnt/raid0                 # uses existing_mount_subdir below
+#     - path: /data/array1
+#       subdir: tier0              # per-entry override
+#     - path: /data/array2
+#       subdir: ''                 # export the mountpoint itself, no subdir
+#
+# So /mnt/raid0 becomes the export /mnt/raid0/tier0.
+#
+# REFUSED: a path that is not actually a mountpoint (exporting a plain
+# directory would hand clients space on the OS disk), and any system mountpoint
+# (/, /boot, /usr, /var, /etc, /home, ...) — the default export options include
+# no_root_squash for Hammerspace nodes.
+#
+# NOTE ON EXPORT OPTIONS: the default options contain `mp`, meaning "only
+# export if this path is itself a mountpoint". An export subdirectory is not
+# one, so `mp` is automatically replaced with `mountpoint=<parent mount>` for
+# subdir exports. That keeps the guarantee — no export if the array is not
+# mounted — without silently producing an empty export list.
+#
+# Leave empty to use normal discovery.
+existing_mount_paths: []
+
+# Directory created inside each existing mount and exported over NFS.
+existing_mount_subdir: tier0
+
+# Ownership/permissions for that directory. Defaults to 0755, root:root.
+# existing_mount_dir_mode: "0755"
+# existing_mount_dir_owner: root
+# existing_mount_dir_group: root
+
+# ============================================================================
 # Dynamic Drive Discovery (Recommended)
 # ============================================================================
 # When enabled, drives are automatically discovered and grouped by NUMA node

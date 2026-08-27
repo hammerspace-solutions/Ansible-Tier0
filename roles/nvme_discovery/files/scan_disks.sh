@@ -61,6 +61,19 @@ DEVROOT="${SCAN_DEVROOT:-/dev}"
 # /mnt does not protect a data volume mounted below it at /mnt/hammerspace/*.
 SYSTEM_MOUNTS="/ /boot /boot/efi /usr /usr/local /var /home /etc /opt /srv /tmp /lib /lib64 /sbin /bin /root /mnt /mnt/resource"
 
+# The subset of SYSTEM_MOUNTS that may NEVER be released, no matter what an
+# operator puts in release_ephemeral_mountpoints. Backs --critical-disks, which
+# release_ephemeral_mounts.yml uses as its non-negotiable refuse-list.
+#
+# Deliberately excluded from this list (i.e. releasable BY EXPLICIT NAME only):
+#   /tmp              cloud images routinely put /tmp on fast local scratch —
+#                     this is the Azure HBv3 / CycleCloud case
+#   /mnt, /mnt/resource   the Azure ephemeral resource disk
+#   /opt, /srv        occasionally used as scratch
+# Those stay in SYSTEM_MOUNTS, so they are still PROTECTED by default. Naming
+# one in release_ephemeral_mountpoints is what makes it eligible.
+HARD_SYSTEM_MOUNTS="/ /boot /boot/efi /usr /usr/local /var /home /etc /lib /lib64 /sbin /bin /root"
+
 # Pseudo block devices that are never real storage. These must not reach
 # PROTECTED: zram swap is standard on modern distros, and letting zram0 satisfy
 # the "protected list is non-empty" gate would disarm the boot-drive check on a
@@ -184,7 +197,10 @@ walk_to_disks() {
 mp_devname() {
     local mp="$1" mm="" name="" src=""
 
-    if command -v findmnt >/dev/null 2>&1; then
+    # findmnt always reads the REAL /proc, so it must be skipped when the caller
+    # has redirected PROCROOT at a fixture — otherwise a test asking about the
+    # fake tree would silently get answers about the host it runs on.
+    if [ "$PROCROOT" = "/proc" ] && command -v findmnt >/dev/null 2>&1; then
         mm=$(findmnt -n -o MAJ:MIN "$mp" 2>/dev/null | head -1 | tr -d '[:space:]')
     fi
     if [ -z "$mm" ] && [ -r "${PROCROOT}/self/mountinfo" ]; then
@@ -208,6 +224,41 @@ case "${1:-}" in
     --resolve-majmin) majmin_to_name "${2:-}"; exit 0 ;;
     --walk)           walk_to_disks "${2:-}";  exit 0 ;;
     --path-to-name)   path_to_name "${2:-}";   exit 0 ;;
+
+    # Physical disk(s) backing one exact mountpoint. Used by
+    # release_ephemeral_mounts.yml to work out what a release would free.
+    --disk-for-mount)
+        _n=$(mp_devname "${2:-}")
+        [ -n "$_n" ] && walk_to_disks "$_n" | grep -Ev "$PSEUDO_RE" | sort -u
+        exit 0
+        ;;
+
+    # Disks that may NEVER be released: those backing a HARD_SYSTEM_MOUNTS
+    # entry or active swap. The refuse-list an operator cannot override.
+    --critical-disks)
+        {
+            for _mp in $HARD_SYSTEM_MOUNTS; do
+                _n=$(mp_devname "$_mp")
+                [ -n "$_n" ] && walk_to_disks "$_n"
+            done
+            if [ -r "${PROCROOT}/swaps" ]; then
+                tail -n +2 "${PROCROOT}/swaps" | while read -r _sp _st _rest; do
+                    [ -n "$_sp" ] || continue
+                    case "$_st" in
+                        file)
+                            _mm=""
+                            [ "$PROCROOT" = "/proc" ] && _mm=$(findmnt -n -o MAJ:MIN -T "$_sp" 2>/dev/null \
+                                  | head -1 | tr -d '[:space:]')
+                            _n=$(majmin_to_name "$_mm")
+                            ;;
+                        *)  _n=$(path_to_name "$_sp") ;;
+                    esac
+                    [ -n "$_n" ] && walk_to_disks "$_n"
+                done
+            fi
+        } | grep -Ev "$PSEUDO_RE" | sort -u
+        exit 0
+        ;;
 esac
 
 # ---------------------------------------------------------------------------
@@ -227,7 +278,8 @@ esac
             [ -n "$sw_path" ] || continue
             case "$sw_type" in
                 file)
-                    mm=$(findmnt -n -o MAJ:MIN -T "$sw_path" 2>/dev/null \
+                    mm=""
+                    [ "$PROCROOT" = "/proc" ] && mm=$(findmnt -n -o MAJ:MIN -T "$sw_path" 2>/dev/null \
                          | head -1 | tr -d '[:space:]')
                     name=$(majmin_to_name "$mm")
                     ;;

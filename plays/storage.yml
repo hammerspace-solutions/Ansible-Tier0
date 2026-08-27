@@ -163,21 +163,44 @@
              else 'is not yet registered in Hammerspace' }}
       when: hammerspace_api_host is defined
 
+    # ------------------------------------------------------------------ #
+    # Existing-mount mode: use filesystems that are already built and mounted
+    # instead of discovering disks and building RAID. Runs as a pre_task so
+    # mount_points / nfs_exports are populated before any role starts, and so
+    # the discovery + filesystem roles below can gate themselves off it.
+    # ------------------------------------------------------------------ #
+    - name: Use existing mounted filesystems instead of building RAID
+      ansible.builtin.include_role:
+        name: nvme_discovery
+        tasks_from: existing_mounts
+      when: existing_mount_paths | default([]) | length > 0
+      tags: [discovery, storage, existing-mounts]
+
   roles:
     # Dynamic storage discovery - groups drives by NUMA and excludes boot device
     # Supports NVMe, HDD, SSD, and mixed environments (set storage_type in vars)
     - role: nvme_discovery
-      when: use_dynamic_discovery | default(true)
+      when:
+        - use_dynamic_discovery | default(true)
+        - existing_mount_paths | default([]) | length == 0
       tags: [discovery, nvme, storage]
 
     - role: precheck
       tags: [precheck, validation]
 
     - role: raid_setup
-      when: use_raid | default(true)
+      when:
+        - use_raid | default(true)
+        # Existing-mount mode brings its own filesystems — nothing to assemble.
+        - existing_mount_paths | default([]) | length == 0
       tags: [raid, storage]
 
+    # Skipped entirely in existing-mount mode: this role runs mkfs against
+    # every mount_points entry and manages /etc/fstab. In that mode the
+    # filesystem already exists and is someone else's to manage — the export
+    # directory was created by existing_mounts.yml and nothing else is needed.
     - role: filesystem_setup
+      when: existing_mount_paths | default([]) | length == 0
       tags: [filesystem, storage]
 
     - role: nfs_setup

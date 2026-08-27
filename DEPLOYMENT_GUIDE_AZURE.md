@@ -384,6 +384,80 @@ drops hosts with no error and `storage_servers` simply comes back empty. Set
 `strict: true` in the inventory to turn those into hard errors while you are
 getting the expression right.
 
+### 4.4b Local NVMe arrives pre-mounted (HB/HC/L-series, CycleCloud)
+
+Azure auto-mounts local NVMe as scratch. On an HB120rs_v3 provisioned by
+CycleCloud the 894 GB NVMe comes up already in use:
+
+```
+NAME     MAJ:MIN RM   SIZE RO TYPE MOUNTPOINTS
+sda      8:0     0    64G   0 disk
+├─sda2   8:2     0   200M   0 part /boot/efi
+├─sda3   8:3     0     1G   0 part /boot
+└─sda4   8:4     0  62.8G   0 part /
+sdb      8:16    0    64G   0 disk
+└─sdb1   8:17    0    64G   0 part /mnt          ← Azure resource disk
+nvme0n1  259:0   0 894.3G   0 disk /tmp
+                                   /nvme         ← the Tier 0 candidate
+```
+
+`/tmp` is a SYSTEM mountpoint, so protected-disk detection correctly classifies
+`nvme0n1` as untouchable and discovery reports **`Discovery produced 0 RAID
+arrays`**. That is not a bug — the disk holds a live filesystem, and `mkfs`
+would fail `EBUSY` regardless.
+
+Three things must line up on this shape of host:
+
+| Symptom | Cause | Fix |
+|---|---|---|
+| `NVMe scan ran?: NO` | `storage_type` is `ssd`/`hdd`/`scsi` — those scan only `/dev/sd*` | `storage_type: nvme` |
+| `nvme0n1` in the protected list | it is mounted at `/tmp` and `/nvme` | `release_ephemeral_mountpoints` (below) |
+| 0 arrays with 1 disk found | `raid_min_drives_per_array: 2` skips a single-drive NUMA group | see "Single local NVMe" below |
+
+**Releasing the scratch mounts.** Opt-in, off by default:
+
+```yaml
+# vars/main.yml
+storage_type: nvme
+release_ephemeral_mountpoints:
+  - /tmp
+  - /nvme
+```
+
+This unmounts both and removes their `/etc/fstab` entries *before* discovery,
+so the disk is an ordinary candidate by the time classification runs. Nothing
+is reformatted by that step, and the usual safety gates still apply afterwards.
+
+A mountpoint whose disk also backs `/`, `/boot`, `/usr`, `/var`, `/etc`,
+`/home` or active swap is **refused outright** — that list cannot be
+overridden.
+
+> **`/tmp` will usually fail to unmount on the first run.** It is nearly always
+> busy on a running system (systemd, logind, user sessions). The fstab entry is
+> removed regardless, so the sequence is: run once, reboot the node, run again.
+> A lazy unmount is deliberately not used — it reports success while the
+> filesystem is still referenced, and a later `mkfs` can then hit a live device.
+
+Check afterwards that nothing will remount them:
+
+```bash
+ansible -i inventory.azure.yml storage_servers -b \
+  -a 'findmnt -n -o TARGET,SOURCE /tmp /nvme; grep -E "/tmp|/nvme" /etc/fstab'
+```
+
+**Single local NVMe.** HB120rs_v3 has one NVMe, so there is nothing to stripe.
+Skip mdadm rather than forcing a one-member array:
+
+```yaml
+use_raid: false
+hw_raid_devices:
+  - /dev/nvme0n1
+```
+
+That path `stat`s the device, formats it XFS and mounts it at
+`/hammerspace/hsvol0` directly. It still requires the disk to be unmounted
+first, so `release_ephemeral_mountpoints` applies either way.
+
 ### 4.5 Scale Sets (VMSS)
 
 Relevant if the Tier 0 nodes are provisioned as a scale set — the normal case

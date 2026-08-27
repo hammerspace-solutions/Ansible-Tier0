@@ -75,8 +75,15 @@
 # Drive Mount Status Check (ensure drives are not already in use)
 # ============================================================================
 
+# include_role, NOT include_tasks with a raw ../nvme_discovery/... path.
+# A raw-path include leaves the included tasks in THIS role's context, so
+# detect_boot_device.yml's `script: scan_disks.sh` would be searched for in
+# roles/precheck/files/ and fail with "Could not find or access 'scan_disks.sh'".
+# Only include_role gives the task file its own role's files/ directory.
 - name: Detect boot device for exclusion
-  ansible.builtin.include_tasks: ../nvme_discovery/tasks/detect_boot_device.yml
+  ansible.builtin.include_role:
+    name: nvme_discovery
+    tasks_from: detect_boot_device
 
 - name: Set boot device check fact
   ansible.builtin.set_fact:

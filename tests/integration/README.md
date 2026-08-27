@@ -274,6 +274,8 @@ fake `SCAN_SYSROOT` tree, so **they run on macOS too** — only the final
 | `majmin_to_name` | `8:2`, `8:1`, `8:0`, `253:0`, `0:24`, empty, garbage, unknown | Real MAJ:MIN → kernel name even when the `SOURCE` string is unusable; major `0` (tmpfs/overlay/nfs) and junk → empty |
 | `walk_to_disks` | `sda2`, `sda`, `md127`, `dm-0`, missing, empty | partition → parent disk; md → members; LV → PV partition → disk; whole disk → itself |
 | `path_to_name` | `sda2[/@]`, plain node, `/dev/mapper/*` symlink, `UUID=`, `overlay`, missing | btrfs subvol suffix stripped, symlink chains followed, non-paths → empty |
+| `--disk-for-mount` | `/tmp`, `/nvme`, `/`, `/var`, `/dev/shm`, unmounted path | Resolves each mountpoint to its physical disk via a fake `/proc/self/mountinfo`; tmpfs and unmounted paths → empty |
+| `--critical-disks` | the non-overridable refuse-list | Exactly `sda` + `sdd`; `nvme0n1` must **not** appear (or `/tmp` could never be released) and `sda` must (or releasing `/tmp` could expose the OS disk) |
 | real host scan (Linux only) | full script run | ≥1 `PROTECTED` line, a `ROOT` line, and **no** pseudo device (`zram*`/`ram*`/`loop*`/`fd*`) in `PROTECTED` — a pseudo device must never be able to satisfy the non-empty gate on its own |
 
 ```bash
@@ -353,6 +355,67 @@ TEST 2 audits the source to catch drift. Keep the two in step.
 
 ```bash
 ansible-playbook tests/integration/test_discovery_diagnostics.yml -i localhost, -c local
+```
+
+## `test_release_ephemeral_mounts.yml`
+
+Safety tests for the opt-in `release_ephemeral_mountpoints` feature, which
+unmounts cloud-provisioned scratch so its disk can be used for Tier 0.
+
+This is the most dangerous feature in the repo — it unmounts filesystems on a
+path that ends in `mkfs` — so these tests exist to keep its rails intact. The
+disk-resolution half (`--disk-for-mount` / `--critical-disks` against a fake
+sysfs) lives in `test_scan_disks.sh`; this file covers the Ansible-side policy.
+
+| # | Scenario | Expected behavior |
+|---|----------|-------------------|
+| 1 | Refuse condition over a mixed plan | `nvme0n1` (scratch) releasable; `sda` (`/boot`) and `sdd` (`/var`) refused |
+| 2 | Critical-backed mountpoint | Play **hard-fails** before any unmount — a condition that evaluates right but never aborts is worthless |
+| 3 | Scratch-only plan | Gate does **not** fire (a refuse-list that blocks everything is equally broken) |
+| 4 | **Audit** | Ships off by default (`release_ephemeral_mountpoints: []`, include gated); **no** `umount -l` / `--lazy` / `force: true` anywhere in the release path; `HARD_SYSTEM_MOUNTS` excludes `/tmp` but contains `/boot` + `/var`; `SYSTEM_MOUNTS` still contains `/tmp`; release runs **before** `detect_boot_device.yml` and the HW RAID block |
+
+TEST 4 audits comment-stripped source: both files legitimately *discuss*
+`umount -l` and `detect_boot_device.yml` in prose, so auditing raw text would
+match explanation rather than behaviour.
+
+```bash
+ansible-playbook tests/integration/test_release_ephemeral_mounts.yml -i localhost, -c local
+```
+
+## `test_existing_mounts.yml`
+
+Tests for **existing-mount mode** (`existing_mount_paths`): use filesystems
+that are already built and mounted instead of discovering disks and building
+RAID. An export directory is created inside each mount and wired into NFS +
+Hammerspace; nothing else is touched.
+
+Two failure modes in this mode are silent, which is why they are pinned here:
+
+- **The `mp` export option.** It means "only export this path if it is itself a
+  mountpoint". An export *subdirectory* is not one, so leaving `mp` in place
+  produces **no export at all** — `/etc/exports` looks correct and `showmount`
+  returns nothing. It must become `mountpoint=<parent>`, which keeps the "do
+  not export if the array is unmounted" guarantee.
+- **`filesystem_setup` runs `mkfs`** against every `mount_points` entry. If it
+  is not gated off, it reformats the very filesystem the operator asked to
+  reuse.
+
+| # | Scenario | Expected behavior |
+|---|----------|-------------------|
+| 1 | Subdirectory export vs bare-mountpoint export | Subdir drops `mp` and gains `mountpoint=<parent>`, other options untouched; a `subdir: ''` export keeps plain `mp` |
+| 2 | Path normalisation | Trailing slash collapsed, empty subdir → the mount itself, and `/` stays `/` rather than normalising to `''`. Caught two real bugs: `'/' \| regex_replace('/+$','')` is the empty string, and `/` + subdir produced `//tier0` |
+| 3 | `existing_mount_paths: ['/']` (runs the real task file) | Refused before anything is created — exporting `/` with `no_root_squash` would hand out the OS |
+| 4 | **Audit** | Ships off by default; `nvme_discovery`, `raid_setup` and `filesystem_setup` all gated on `existing_mount_paths ... length == 0`; the task file contains no `mkfs` / `wipefs` / `mdadm` / `ansible.posix.mount` |
+
+TEST 4 audits comment-stripped source — the task file's header *describes* what
+it must never do, so auditing raw text matches prose instead of behaviour.
+
+The `findmnt`-backed checks (is it really a mountpoint, which disk backs it)
+need Linux; on macOS TEST 3 still fires because the system-mountpoint refusal
+runs first and is a pure string check.
+
+```bash
+ansible-playbook tests/integration/test_existing_mounts.yml -i localhost, -c local
 ```
 
 ## Running
