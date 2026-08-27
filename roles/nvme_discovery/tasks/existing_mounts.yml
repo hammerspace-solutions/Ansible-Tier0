@@ -177,24 +177,48 @@
       loop_control:
         label: "{{ item.export_path }}"
 
+    # NO check_mode: false here, unlike the probes above.
+    #
+    # The distinction matters: `check_mode: false` is correct for probing
+    # PRE-EXISTING state (findmnt, --critical-disks, --disk-for-mount) — check
+    # mode does not change any of that, and skipping those probes would produce
+    # empty facts. It is WRONG for probing state that an earlier task in the
+    # same run creates. Under --check the mkdir above is only SIMULATED, so a
+    # `check_mode: false` probe here tests a directory that does not exist,
+    # `test -w` returns 1, and the dry run hard-fails on a directory the real
+    # run would have created:
+    #
+    #   TASK [Fail if an export directory is not writable]
+    #   failed: (item=/nvme) ... cmd: [test, -w, /nvme/tier0]  rc: 1
+    #
+    # So this is skipped under --check, alongside the mkdir it depends on.
     - name: Verify each export directory is writable
       ansible.builtin.command: >-
         test -w {{ item.export_path | quote }}
       register: _em_writable
       changed_when: false
       failed_when: false
-      check_mode: false
+      when: not ansible_check_mode
       loop: "{{ _existing_mounts }}"
       loop_control:
         label: "{{ item.path }}"
 
+    # `| default([])`: when the probe above is skipped under --check the
+    # registered var has no `results` key at all, so the loop must tolerate it.
     - name: Fail if an export directory is not writable
       ansible.builtin.fail:
         msg: |
-          Export directory {{ item.item.export_path }}
-          is not writable. A read-only mount cannot serve Tier 0.
-          Check: findmnt -n -o TARGET,OPTIONS {{ item.item.path }}
-      loop: "{{ _em_writable.results }}"
+          Export directory {{ item.item.export_path }} is not writable.
+
+          Either {{ item.item.path }} is mounted read-only, or the directory
+          was not created. Check both:
+
+            findmnt -n -o TARGET,SOURCE,OPTIONS {{ item.item.path }}
+            ls -ld {{ item.item.path }} {{ item.item.export_path }}
+
+          If {{ item.item.path }} itself is writable (touch a file there to
+          confirm) then the directory is missing rather than read-only.
+      loop: "{{ _em_writable.results | default([]) }}"
       loop_control:
         label: "{{ item.item.path }}"
       when: item.rc != 0

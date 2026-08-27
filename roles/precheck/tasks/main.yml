@@ -36,6 +36,12 @@
 # no candidate drives to validate.
 - name: Set pre-provisioned storage mode for precheck
   ansible.builtin.set_fact:
+    # Kept as two facts, not one: _precheck_hw_raid answers "skip the drive /
+    # NUMA / sector checks", which is true for BOTH modes, while
+    # _precheck_existing_mounts says WHICH mode it is. Collapsing them made the
+    # HW-RAID summary render in existing-mount mode and blow up on the
+    # undefined hw_raid_devices (2026-08-27).
+    _precheck_existing_mounts: "{{ (existing_mount_paths | default([]) | length > 0) | bool }}"
     _precheck_hw_raid: >-
       {{ ((hw_raid_devices is defined and hw_raid_devices | length > 0
            and not (use_raid | default(true)))
@@ -108,14 +114,21 @@
 # Validation Summary
 # ============================================================================
 
-- name: Validation summary (HW RAID mode)
+- name: Validation summary (pre-provisioned storage)
   ansible.builtin.debug:
     msg: |
       ============================================
-      PRE-SETUP VALIDATION SUMMARY (HW RAID MODE)
+      PRE-SETUP VALIDATION SUMMARY
+      ({{ 'EXISTING-MOUNT MODE' if _precheck_existing_mounts else 'HW RAID MODE' }})
       ============================================
+      {% if _precheck_existing_mounts %}
+      Mode: Existing mounted filesystems (discovery, RAID and mkfs skipped)
+      Existing mounts: {% for m in existing_mount_paths | default([]) %}{{ m if m is string else m.path }}{{ ', ' if not loop.last else '' }}{% endfor %}
+
+      {% else %}
       Mode: Hardware RAID (software RAID skipped)
-      HW RAID Devices: {{ hw_raid_devices | join(', ') }}
+      HW RAID Devices: {{ hw_raid_devices | default([]) | join(', ') }}
+      {% endif %}
 
       Network:
         - MTU tests: {% if ping_results.results is defined %}{{ ping_results.results | selectattr('rc', 'equalto', 0) | list | length }}/{{ ping_results.results | length }} passed{% else %}not configured{% endif %}

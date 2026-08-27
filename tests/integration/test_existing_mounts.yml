@@ -218,6 +218,99 @@
               REGRESSION: existing_mounts.yml must never format, wipe, assemble
               or mount anything. Its only write is mkdir of the export directory.
 
+        # 2026-08-27: generalising _precheck_hw_raid to also mean existing-mount
+        # mode made the HW-RAID summary render in a mode where hw_raid_devices
+        # is undefined:
+        #   TASK [precheck : Validation summary (HW RAID mode)]
+        #   'hw_raid_devices' is undefined
+        # Any reference to a mode-specific var in a task shared by both modes
+        # must be guarded.
+        # 2026-08-27: the gates were added to plays/storage.yml only. A SECOND
+        # entry point, site-onprem-nvme.yml, has its own roles list and ran
+        # raid_setup + filesystem_setup ungated — the latter would have run
+        # mkfs against /nvme/tier0's device and destroyed the array. Every
+        # playbook that runs these roles must gate them.
+        - name: Find every playbook that runs the destructive storage roles
+          ansible.builtin.find:
+            paths:
+              - "{{ playbook_dir }}/../.."
+              - "{{ playbook_dir }}/../../plays"
+            patterns: "*.yml"
+            recurse: false
+          register: _pb_files
+
+        - name: Read those playbooks
+          ansible.builtin.slurp:
+            src: "{{ item.path }}"
+          register: _pb_src
+          loop: "{{ _pb_files.files }}"
+          loop_control:
+            label: "{{ item.path | basename }}"
+
+        - name: Compute which playbooks are ungated
+          ansible.builtin.set_fact:
+            _ungated: >-
+              {{ _ungated | default([]) +
+                 ([item.item.path | basename]
+                  if (('role: filesystem_setup' in (item.content | b64decode)
+                       or 'role: raid_setup' in (item.content | b64decode))
+                      and 'existing_mount_paths' not in (item.content | b64decode))
+                  else []) }}
+          loop: "{{ _pb_src.results }}"
+          loop_control:
+            label: "{{ item.item.path | basename }}"
+
+        - name: 'TEST 4 ASSERT: no ungated entry point remains'
+          ansible.builtin.assert:
+            that:
+              - _ungated | default([]) | length == 0
+            fail_msg: |
+              REGRESSION: {{ _ungated | join(', ') }} run(s) raid_setup or
+              filesystem_setup without any reference to existing_mount_paths.
+              filesystem_setup runs mkfs over mount_points — ungated, that
+              reformats the array the operator asked to reuse.
+
+        - name: Read precheck main.yml
+          ansible.builtin.slurp:
+            src: "{{ playbook_dir }}/../../roles/precheck/tasks/main.yml"
+          register: _pc_src
+
+        - name: 'TEST 4 ASSERT: precheck guards every hw_raid_devices reference'
+          ansible.builtin.assert:
+            that:
+              - _unguarded | length == 0
+            fail_msg: |
+              REGRESSION: {{ _unguarded | length }} unguarded hw_raid_devices
+              reference(s) in precheck. Tasks shared by HW-RAID and
+              existing-mount mode must use `| default(...)` or an
+              `is defined` test — existing-mount hosts never set that var:
+              {{ _unguarded | join('\n') }}
+          vars:
+            # regex_findall with (?m), not .split('\n'): inside a folded YAML
+            # scalar the two-character sequence backslash-n reaches Jinja
+            # verbatim and does NOT split, so the whole file arrives as ONE
+            # element and the audit silently passes. Character classes instead
+            # of backslash escapes for the same reason.
+            _hw_lines: >-
+              {{ (_pc_src.content | b64decode)
+                 | regex_findall('(?m)^.*hw_raid_devices.*$') }}
+            _unguarded: >-
+              {{ _hw_lines
+                 | reject('search', 'is defined')
+                 | reject('search', 'default[(]')
+                 | reject('match', '[ ]*#')
+                 | list }}
+
+        - name: 'TEST 4 ASSERT: precheck distinguishes the two pre-provisioned modes'
+          ansible.builtin.assert:
+            that:
+              - "'_precheck_existing_mounts' in (_pc_src.content | b64decode)"
+            fail_msg: |
+              REGRESSION: _precheck_hw_raid alone cannot say WHICH
+              pre-provisioned mode is active — it is true for both. A separate
+              _precheck_existing_mounts fact is required so mode-specific
+              output picks the right branch.
+
         - name: Record TEST 4 pass
           ansible.builtin.set_fact:
             _test_passes: "{{ _test_passes + ['TEST 4: audit — opt-in default, destructive roles gated off, task file writes only mkdir'] }}"
@@ -225,6 +318,86 @@
         - name: Record TEST 4 failure
           ansible.builtin.set_fact:
             _test_failures: "{{ _test_failures + ['TEST 4: ' ~ (ansible_failed_result.msg | default('unknown') | replace('\n', ' '))] }}"
+
+    # ========================================================================
+    # TEST 5: check_mode on probes — pre-existing state vs state this run makes
+    # ========================================================================
+    # Reported 2026-08-27 on the HB120v3. A dry run of existing-mount mode
+    # aborted with:
+    #
+    #   TASK [nvme_discovery : Fail if an export directory is not writable]
+    #   failed: (item=/nvme) ... cmd: [test, -w, /nvme/tier0]  rc: 1
+    #   Export directory /nvme/tier0 is not writable.
+    #
+    # /nvme was perfectly writable. The writability probe carried
+    # `check_mode: false`, so it ran for real — but the mkdir above it was only
+    # SIMULATED under --check, so it tested a directory that did not exist.
+    #
+    # The rule this pins: `check_mode: false` is correct for probing
+    # PRE-EXISTING state (findmnt, --critical-disks, --disk-for-mount), and
+    # WRONG for probing state an earlier task in the same run creates.
+    - name: 'TEST 5: writability probe is not check_mode: false'
+      block:
+        - name: Read the task file
+          ansible.builtin.slurp:
+            src: "{{ playbook_dir }}/../../roles/nvme_discovery/tasks/existing_mounts.yml"
+          register: _em_src
+
+        - name: Isolate the writability probe and strip comments
+          ansible.builtin.set_fact:
+            _probe: >-
+              {{ ((_em_src.content | b64decode).split('Verify each export directory is writable')[1]
+                  | default('')).split('- name:')[0]
+                 | default('') }}
+            # regex_findall on the real YAML directive rather than comment
+            # stripping: '\n\s+check_mode:' cannot match a commented line,
+            # because a comment puts '#' between the indent and the key.
+            _em_directives: >-
+              {{ (_em_src.content | b64decode)
+                 | regex_findall('\n\s+check_mode:\s+false') }}
+            _em_raw: "{{ _em_src.content | b64decode }}"
+
+        - name: 'TEST 5 ASSERT: the probe waits for check mode instead of overriding it'
+          ansible.builtin.assert:
+            that:
+              - "'check_mode: false' not in _probe"
+              - "'not ansible_check_mode' in _probe"
+            fail_msg: |
+              REGRESSION: the export-directory writability probe must NOT carry
+              `check_mode: false`. The mkdir it depends on is only simulated
+              under --check, so the probe would test a directory that does not
+              exist and hard-fail a dry run on a perfectly good filesystem.
+              Probe body: {{ _probe }}
+
+        - name: 'TEST 5 ASSERT: only the pre-existing-state probes override check mode'
+          ansible.builtin.assert:
+            that:
+              # findmnt mountpoint check, --critical-disks, --disk-for-mount.
+              # None of those inspect anything this run creates.
+              - "_em_directives | length == 3"
+            fail_msg: |
+              The number of `check_mode: false` directives changed. Each one
+              must probe state that exists BEFORE this run. If you added a probe
+              for something the play itself creates, it must be gated on
+              `not ansible_check_mode` instead.
+              Found {{ _em_directives | length }}, expected 3.
+
+        - name: 'TEST 5 ASSERT: the fail task tolerates a skipped probe'
+          ansible.builtin.assert:
+            that:
+              - "'_em_writable.results | default([])' in _em_raw"
+            fail_msg: |
+              REGRESSION: when the probe is skipped under --check its registered
+              var has no `results` key at all, so the fail task's loop must use
+              `| default([])` or the dry run dies templating the loop.
+
+        - name: Record TEST 5 pass
+          ansible.builtin.set_fact:
+            _test_passes: "{{ _test_passes + ['TEST 5: writability probe defers to check mode; only pre-existing-state probes override it'] }}"
+      rescue:
+        - name: Record TEST 5 failure
+          ansible.builtin.set_fact:
+            _test_failures: "{{ _test_failures + ['TEST 5: ' ~ (ansible_failed_result.msg | default('unknown') | replace('\n', ' '))] }}"
 
     # ========================================================================
     # Report
