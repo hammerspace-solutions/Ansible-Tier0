@@ -24,6 +24,14 @@
       failed_when: false
       no_log: true
 
+    # Azure Key Vault (opt-in) — overrides vars/vault.yml when set. Must
+    # resolve BEFORE anything authenticates against the Anvil.
+    - name: Retrieve Hammerspace password from Azure Key Vault (optional)
+      ansible.builtin.include_role:
+        name: hammerspace_integration
+        tasks_from: keyvault_password
+      when: (hammerspace_keyvault_uri | default('')) | length > 0
+
   tasks:
     - name: Skip if DI is not enabled or auto-export is disabled
       ansible.builtin.meta: end_play

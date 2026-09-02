@@ -1,0 +1,224 @@
+---
+# Add this run's Tier 0 volumes to an ALREADY-EXISTING volume group.
+#
+# Enabled by setting hammerspace_volume_group to the name of a group that
+# already exists in Hammerspace (typically carrying placement objectives).
+#
+# CONTRACT — this task file will NOT:
+#   - create the volume group (it must already exist; a 404 is a hard failure,
+#     not a silent skip, or the volumes would never pick up its objectives)
+#   - remove, reorder or rewrite any volume already in the group
+#   - re-add a volume that is already a member
+# It appends only, and only the volumes this run created.
+#
+# WHY ONE run_once WRITE INSTEAD OF ONE PER VOLUME
+# ------------------------------------------------
+# Updating a volume group is a read-modify-write: GET the group, append to
+# expressions[0].locations, PUT the whole thing back. hammerspace_integration
+# runs on every storage_server in PARALLEL, so a per-host update races —
+#
+#   host A: GET (sees V1)          host B: GET (sees V1)
+#   host A: PUT (V1 + A)           host B: PUT (V1 + B)   <- drops A
+#
+# The last writer wins and silently discards the other host's volume. Existing
+# members survive (both reads saw them), but newly added ones vanish, which is
+# exactly the kind of loss that is not noticed until objectives fail to apply.
+#
+# So this runs ONCE for the whole play, unions the volume names recorded by
+# every host, and performs a single read-modify-write.
+#
+# This does NOT protect against a concurrent run of a different playbook, or
+# someone editing the group in the UI at the same moment. Those remain
+# last-writer-wins; the post-write verification below at least detects it.
+
+- name: Add this run's volumes to the configured volume group
+  when: (hammerspace_volume_group | default('')) | length > 0
+  run_once: true
+  block:
+    # Union across every host in the play. add_volume.yml records the exact
+    # name it used on each host; hostvars is how we reach them from run_once.
+    - name: Collect volume names created by every host in this run
+      ansible.builtin.set_fact:
+        _vg_run_volumes: >-
+          {{ ansible_play_hosts
+             | map('extract', hostvars, '_hs_run_volume_names')
+             | select('defined') | map('list') | sum(start=[]) | unique | sort }}
+
+    - name: Report when this run created no volumes to add
+      ansible.builtin.debug:
+        msg: >-
+          No volumes were created in this run, so volume group
+          '{{ hammerspace_volume_group }}' is left untouched.
+      when: _vg_run_volumes | length == 0
+
+    - name: Join the volume group
+      when: _vg_run_volumes | length > 0
+      block:
+        - name: "Wait for task queue before updating volume group {{ hammerspace_volume_group }}"
+          ansible.builtin.include_tasks: task_queue_wait.yml
+          when: hammerspace_task_queue_throttle | default(true)
+
+        - name: "Get the existing volume group {{ hammerspace_volume_group }}"
+          ansible.builtin.shell:
+            cmd: >-
+              curl -s -o /dev/stdout -w "\n%{http_code}" --max-time {{ hammerspace_api_curl_timeout | default(60) }}
+              {{ '' if (hammerspace_api_validate_certs | default(false)) else '-k' }}
+              -H "Authorization: Basic {{ (hammerspace_api_user ~ ':' ~ hammerspace_api_password) | b64encode }}"
+              "{{ hs_api_url }}/volume-groups/{{ hammerspace_volume_group | urlencode }}"
+          register: _vg_get_raw
+          changed_when: false
+          failed_when: false
+          check_mode: false
+          no_log: true
+
+        - name: Parse the volume group response
+          ansible.builtin.set_fact:
+            _vg_status: "{{ (_vg_get_raw.stdout_lines | default(['0']))[-1] | default('0') | int }}"
+            _vg_json: "{{ ((_vg_get_raw.stdout_lines | default(['{}']))[:-1] | join('\n') | trim | default('{}', true)) | from_json }}"
+
+        # Deliberately a hard failure. The group carries the placement
+        # objectives; if it is missing, the volumes are deployed but orphaned,
+        # and a silent skip would hide that until someone audits objectives.
+        - name: Fail if the configured volume group does not exist
+          ansible.builtin.fail:
+            msg: |
+              Volume group '{{ hammerspace_volume_group }}' does not exist
+              (HTTP {{ _vg_status }}).
+
+              hammerspace_volume_group names a group that must ALREADY exist —
+              this playbook never creates it, because creating one without the
+              intended placement objectives would silently give the volumes the
+              wrong policy.
+
+              Either create it first (UI, or hammerspace_create_volume_groups
+              with hammerspace_volume_groups), or clear hammerspace_volume_group
+              to skip group membership entirely.
+
+              Existing groups:
+                curl -sk -u '{{ hammerspace_api_user }}:<password>' \
+                  '{{ hs_api_url }}/volume-groups' | jq -r '.[].name'
+          when: _vg_status | int != 200
+
+        - name: Determine which volumes are not yet members
+          ansible.builtin.set_fact:
+            _vg_existing_locations: "{{ _vg_json.expressions[0].locations | default([]) }}"
+            _vg_existing_names: >-
+              {{ _vg_json.expressions[0].locations | default([])
+                 | map(attribute='storageVolume.name') | list }}
+
+        - name: Compute the additions
+          ansible.builtin.set_fact:
+            _vg_to_add: "{{ _vg_run_volumes | difference(_vg_existing_names) }}"
+
+        - name: Report when every volume is already a member
+          ansible.builtin.debug:
+            msg: >-
+              All {{ _vg_run_volumes | length }} volume(s) from this run are
+              already in '{{ hammerspace_volume_group }}' — no change.
+          when: _vg_to_add | length == 0
+
+        - name: Apply the additions
+          when: _vg_to_add | length > 0
+          block:
+            - name: Show exactly what will change
+              ansible.builtin.debug:
+                msg: |
+                  Volume group: {{ hammerspace_volume_group }}
+                    existing members (preserved): {{ _vg_existing_names | length }}
+                  {% for v in _vg_existing_names %}    - {{ v }}
+                  {% endfor %}
+                    adding: {{ _vg_to_add | length }}
+                  {% for v in _vg_to_add %}    + {{ v }}
+                  {% endfor %}
+
+            # existing + new, in that order. Existing entries are carried over
+            # verbatim rather than rebuilt, so any fields the API sets on them
+            # survive the round trip.
+            - name: Build the append-only payload
+              ansible.builtin.set_fact:
+                _vg_payload:
+                  _type: "VOLUME_GROUP"
+                  name: "{{ hammerspace_volume_group }}"
+                  expressions:
+                    - operator: "IN"
+                      locations: >-
+                        {{ _vg_existing_locations + (_vg_to_add | map('regex_replace', '^(.*)$',
+                           '{"_type": "VOLUME_LOCATION", "extendedInfo": {}, "storageVolume":
+                           {"_type": "STORAGE_VOLUME", "extendedInfo": {}, "name": "\1"}}')
+                           | map('from_json') | list) }}
+
+            - name: "Update volume group {{ hammerspace_volume_group }}"
+              ansible.builtin.shell:
+                cmd: >-
+                  curl -s -o /dev/stdout -w "\n%{http_code}" --max-time {{ hammerspace_api_curl_timeout | default(180) }}
+                  {{ '' if (hammerspace_api_validate_certs | default(false)) else '-k' }}
+                  -H "Authorization: Basic {{ (hammerspace_api_user ~ ':' ~ hammerspace_api_password) | b64encode }}"
+                  -X PUT -H "Content-Type: application/json"
+                  -d '{{ _vg_payload | to_json }}'
+                  "{{ hs_api_url }}/volume-groups/{{ hammerspace_volume_group | urlencode }}"
+              register: _vg_put_raw
+              changed_when: true
+              failed_when: false
+              no_log: true
+              when: not ansible_check_mode
+
+            - name: Fail if the volume group update was rejected
+              ansible.builtin.fail:
+                msg: |
+                  Updating volume group '{{ hammerspace_volume_group }}' failed
+                  with HTTP {{ (_vg_put_raw.stdout_lines | default(['0']))[-1] | default('0') }}.
+
+                  No volumes were added. Existing members are unaffected — the
+                  update is a single atomic PUT that either applies or does not.
+              when:
+                - not ansible_check_mode
+                - ((_vg_put_raw.stdout_lines | default(['0']))[-1] | default('0') | int) not in [200, 201, 202]
+
+            # Re-read rather than trusting the PUT: confirms the additions
+            # landed AND that nothing else was lost to a concurrent writer.
+            - name: Verify group membership after the update
+              ansible.builtin.shell:
+                cmd: >-
+                  curl -s --max-time {{ hammerspace_api_curl_timeout | default(60) }}
+                  {{ '' if (hammerspace_api_validate_certs | default(false)) else '-k' }}
+                  -H "Authorization: Basic {{ (hammerspace_api_user ~ ':' ~ hammerspace_api_password) | b64encode }}"
+                  "{{ hs_api_url }}/volume-groups/{{ hammerspace_volume_group | urlencode }}"
+              register: _vg_verify_raw
+              changed_when: false
+              failed_when: false
+              check_mode: false
+              no_log: true
+              when: not ansible_check_mode
+
+            - name: Parse verified membership
+              ansible.builtin.set_fact:
+                _vg_final_names: >-
+                  {{ (_vg_verify_raw.stdout | default('{}') | from_json).expressions[0].locations
+                     | default([]) | map(attribute='storageVolume.name') | list }}
+              when: not ansible_check_mode
+
+            - name: Fail if any expected member is missing after the update
+              ansible.builtin.fail:
+                msg: |
+                  Volume group '{{ hammerspace_volume_group }}' is missing
+                  {{ _vg_missing | length }} expected member(s) after the update:
+                  {{ _vg_missing | join(', ') }}
+
+                  Both the pre-existing members and this run's volumes should be
+                  present. A missing entry usually means something else wrote to
+                  this group at the same time (another playbook run, or the UI).
+              vars:
+                _vg_missing: >-
+                  {{ (_vg_existing_names + _vg_to_add) | difference(_vg_final_names) }}
+              when:
+                - not ansible_check_mode
+                - ((_vg_existing_names + _vg_to_add) | difference(_vg_final_names)) | length > 0
+
+            - name: Report the final membership
+              ansible.builtin.debug:
+                msg: >-
+                  Volume group '{{ hammerspace_volume_group }}' now has
+                  {{ _vg_final_names | default([]) | length }} member(s)
+                  ({{ _vg_existing_names | length }} pre-existing preserved,
+                  {{ _vg_to_add | length }} added).
+              when: not ansible_check_mode

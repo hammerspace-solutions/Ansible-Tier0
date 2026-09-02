@@ -356,6 +356,30 @@ hammerspace_api_host: "10.0.10.15"
 hammerspace_api_user: "admin"
 hammerspace_api_password: "{{ vault_hammerspace_api_password }}"
 
+# ----------------------------------------------------------------------------
+# Azure Key Vault password retrieval (OPT-IN, overrides vars/vault.yml)
+# ----------------------------------------------------------------------------
+# Set hammerspace_keyvault_uri to pull the admin password from Key Vault
+# instead of vars/vault.yml, so no password file is needed on the scheduler.
+# Leave it unset and the vault_hammerspace_api_password above is used.
+#
+#   hammerspace_keyvault_uri: "https://my-vault.vault.azure.net"
+#   hammerspace_keyvault_secret_name: "hammerspace-admin-password"
+#
+# Authentication uses the standard azure.azcollection chain. On a CycleCloud
+# scheduler with a managed identity, "msi" is usually the right choice; "auto"
+# also works but tries several sources first.
+#   auto | cli | credential_file | env | msi
+hammerspace_keyvault_auth_source: "auto"
+#
+# The identity needs GET on secrets for that vault — the "Key Vault Secrets
+# User" RBAC role, or a `get` secret permission if the vault still uses access
+# policies. Verify by hand first:
+#   az keyvault secret show --vault-name <vault> --name <secret> --query value -o tsv
+#
+# The lookup runs on the controller (delegate_to: localhost, run_once), so only
+# the scheduler needs vault access — not every target node.
+
 # API port (default: 8443)
 # hammerspace_api_port: 8443
 
@@ -587,6 +611,29 @@ hammerspace_gpu_fabric_az_update_file: true
 # Volume Groups (from Hammerspace Engineering)
 # ============================================================================
 # Create volume groups for organizing volumes by AZ or location
+
+# ----------------------------------------------------------------------------
+# Join an ALREADY-EXISTING volume group (append-only)
+# ----------------------------------------------------------------------------
+# Name of a volume group that already exists in Hammerspace — typically one
+# carrying placement objectives. Every volume this run creates is added to it.
+#
+#   hammerspace_volume_group: "tier0-nvme"
+#
+# Guarantees:
+#   - the group is NEVER created here. If it does not exist the run FAILS,
+#     rather than silently deploying volumes that never pick up its objectives.
+#   - volumes already in the group are preserved untouched — the update is
+#     append-only (GET, append, single PUT), and membership is re-read
+#     afterwards to confirm nothing was lost.
+#   - re-running is a no-op once the volumes are members.
+#
+# The update runs ONCE per play, not once per host: hammerspace_integration
+# runs on all storage_servers in parallel, and a per-host read-modify-write
+# would let the last writer discard volumes added by the others.
+#
+# Leave empty to skip volume group membership entirely.
+hammerspace_volume_group: ""
 
 hammerspace_create_volume_groups: false
 # hammerspace_volume_groups:

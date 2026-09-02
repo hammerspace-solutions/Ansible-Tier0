@@ -42,6 +42,17 @@
       no_log: true
       tags: [always]
 
+    # Azure Key Vault (opt-in) — overrides vars/vault.yml when set. Must
+    # resolve BEFORE anything authenticates against the Anvil.
+    # The always-tag below is required: pre_tasks here must survive
+    # `--tags di-activate` filtering (test_di_activate_tag.yml enforces this).
+    - name: Retrieve Hammerspace password from Azure Key Vault (optional)
+      ansible.builtin.include_role:
+        name: hammerspace_integration
+        tasks_from: keyvault_password
+      when: (hammerspace_keyvault_uri | default('')) | length > 0
+      tags: [always]
+
     - name: Skip build play unless k8s mode + build_push is enabled
       ansible.builtin.meta: end_play
       when:
@@ -93,6 +104,17 @@
         file: "{{ repo_root }}/vars/vault.yml"
       failed_when: false
       no_log: true
+      tags: [always]
+
+    # Azure Key Vault (opt-in) — overrides vars/vault.yml when set. Must
+    # resolve BEFORE anything authenticates against the Anvil.
+    # The always-tag below is required: pre_tasks here must survive
+    # `--tags di-activate` filtering (test_di_activate_tag.yml enforces this).
+    - name: Retrieve Hammerspace password from Azure Key Vault (optional)
+      ansible.builtin.include_role:
+        name: hammerspace_integration
+        tasks_from: keyvault_password
+      when: (hammerspace_keyvault_uri | default('')) | length > 0
       tags: [always]
 
     - name: Skip DI deployment if not enabled

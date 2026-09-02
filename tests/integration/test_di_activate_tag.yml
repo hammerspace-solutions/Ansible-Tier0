@@ -131,7 +131,10 @@
                 /^  pre_tasks:/ || /^  post_tasks:/ { in_section=1; next }
                 /^  [a-z]/                          { in_section=0 }
                 in_section && /^    - name:/      { task_count++ }
-                in_section && /tags:[[:space:]]*\[always\]/ { always_count++ }
+                # Anchored to the directive form. An unanchored match also counts
+                # comment lines that merely MENTION `tags: [always]`, which made
+                # this audit report more tags than tasks (2026-09-02).
+                in_section && /^[[:space:]]+tags:[[:space:]]*\[always\]/ { always_count++ }
                 END { printf "%d %d\n", task_count, always_count }
               ' "{{ _play_di }}"
           register: _tag_counts

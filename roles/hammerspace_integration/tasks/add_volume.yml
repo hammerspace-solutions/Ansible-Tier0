@@ -34,6 +34,14 @@
     volume_name: "{{ _effective_az_prefix }}{{ hammerspace_node_name | default(inventory_hostname) }}::{{ volume_config.path }}"
     node_name: "{{ hammerspace_node_name | default(inventory_hostname) }}"
 
+# Record the name actually used, rather than re-deriving it later for volume
+# group membership. The name depends on the AZ prefix resolution above, and a
+# re-derivation that drifted by even one character would add a NON-EXISTENT
+# volume to a production volume group.
+- name: "Record volume name for volume group membership"
+  ansible.builtin.set_fact:
+    _hs_run_volume_names: "{{ (_hs_run_volume_names | default([])) + [volume_name] }}"
+
 - name: "Build volume payload for {{ volume_config.path }}"
   ansible.builtin.set_fact:
     volume_payload:
