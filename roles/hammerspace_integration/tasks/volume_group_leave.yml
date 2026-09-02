@@ -1,0 +1,132 @@
+---
+# Remove a set of volumes from every volume group that contains them.
+#
+# The inverse of volume_group_join.yml, and the step that has to happen BEFORE
+# the volumes themselves are deleted — otherwise the groups are left holding
+# references to storage that no longer exists.
+#
+# Input:
+#   _vgl_volumes  list of volume names to remove (exact names as Hammerspace
+#                 knows them, e.g. "AZ1:node-1::/nvme/tier0")
+#
+# CONTRACT — this task file will NOT:
+#   - delete a volume group, even if removing these volumes empties it
+#   - remove any volume that is not in _vgl_volumes
+#   - touch groups that contain none of the listed volumes
+#   - touch any data on any host
+# It removes only the named volumes, from only the groups that hold them.
+#
+# Like the join, this is run_once with a single read-modify-write per affected
+# group: hammerspace_integration-style parallel execution would otherwise race
+# and let one host's PUT reinstate volumes another host just removed.
+
+- name: Remove volumes from any volume group that contains them
+  when: (_vgl_volumes | default([])) | length > 0
+  run_once: true
+  delegate_to: localhost
+  become: false
+  block:
+    - name: List all volume groups
+      ansible.builtin.shell:
+        cmd: >-
+          curl -s --max-time {{ hammerspace_api_curl_timeout | default(60) }}
+          {{ '' if (hammerspace_api_validate_certs | default(false)) else '-k' }}
+          -H "Authorization: Basic {{ (hammerspace_api_user ~ ':' ~ hammerspace_api_password) | b64encode }}"
+          "{{ hs_api_url }}/volume-groups"
+      register: _vgl_all_raw
+      changed_when: false
+      failed_when: false
+      check_mode: false
+      no_log: true
+
+    - name: Parse the volume group list
+      ansible.builtin.set_fact:
+        _vgl_all: "{{ (_vgl_all_raw.stdout | default('[]') | trim | default('[]', true)) | from_json }}"
+
+    - name: Build the per-group removal plan
+      ansible.builtin.set_fact:
+        _vgl_plan: >-
+          {{ (_vgl_plan | default([])) + [{
+               'name': item.name,
+               'keep': (item.expressions[0].locations | default([]))
+                       | rejectattr('storageVolume.name', 'in', _vgl_volumes) | list,
+               'remove': (item.expressions[0].locations | default([]))
+                         | selectattr('storageVolume.name', 'in', _vgl_volumes)
+                         | map(attribute='storageVolume.name') | list
+             }] }}
+      loop: "{{ _vgl_all | selectattr('expressions', 'defined') | list }}"
+      loop_control:
+        label: "{{ item.name | default('?') }}"
+
+    - name: Narrow to groups that actually change
+      ansible.builtin.set_fact:
+        _vgl_changes: "{{ (_vgl_plan | default([])) | selectattr('remove', 'ne', []) | list }}"
+
+    - name: Report when no volume group holds these volumes
+      ansible.builtin.debug:
+        msg: >-
+          None of the {{ _vgl_volumes | length }} volume(s) being decommissioned
+          are members of any volume group — nothing to remove.
+      when: _vgl_changes | length == 0
+
+    - name: Show exactly what will change
+      ansible.builtin.debug:
+        msg: |
+          Volume group membership changes:
+          {% for g in _vgl_changes %}
+            {{ g.name }}
+              removing ({{ g.remove | length }}):
+          {% for v in g.remove %}      - {{ v }}
+          {% endfor %}
+              keeping  ({{ g.keep | length }}):
+          {% for v in g.keep | map(attribute='storageVolume.name') | list %}      = {{ v }}
+          {% endfor %}
+          {% endfor %}
+      when: _vgl_changes | length > 0
+
+    # The group itself is never deleted, even when it ends up empty — it may
+    # carry placement objectives that other deployments will populate later.
+    - name: Update each affected volume group
+      ansible.builtin.shell:
+        cmd: >-
+          curl -s -o /dev/stdout -w "\n%{http_code}" --max-time {{ hammerspace_api_curl_timeout | default(180) }}
+          {{ '' if (hammerspace_api_validate_certs | default(false)) else '-k' }}
+          -H "Authorization: Basic {{ (hammerspace_api_user ~ ':' ~ hammerspace_api_password) | b64encode }}"
+          -X PUT -H "Content-Type: application/json"
+          -d '{{ {'_type': 'VOLUME_GROUP', 'name': item.name,
+                  'expressions': [{'operator': 'IN', 'locations': item.keep}]} | to_json }}'
+          "{{ hs_api_url }}/volume-groups/{{ item.name | urlencode }}"
+      register: _vgl_put
+      changed_when: true
+      failed_when: false
+      no_log: true
+      loop: "{{ _vgl_changes }}"
+      loop_control:
+        label: "{{ item.name }} (-{{ item.remove | length }})"
+      when: not ansible_check_mode
+
+    - name: Fail if any volume group update was rejected
+      ansible.builtin.fail:
+        msg: |
+          Removing volumes from volume group '{{ item.item.name }}' failed with
+          HTTP {{ (item.stdout_lines | default(['0']))[-1] | default('0') }}.
+
+          The volumes have NOT been deleted — decommission stopped here so the
+          groups and the volumes stay consistent. Re-run after resolving the
+          API error.
+      loop: "{{ _vgl_put.results | default([]) }}"
+      loop_control:
+        label: "{{ item.item.name | default('?') }}"
+      when:
+        - not ansible_check_mode
+        - ((item.stdout_lines | default(['0']))[-1] | default('0') | int) not in [200, 201, 202]
+
+    - name: Report volume group removal complete
+      ansible.builtin.debug:
+        msg: >-
+          Removed {{ _vgl_changes | map(attribute='remove') | map('length') | sum }}
+          volume reference(s) from {{ _vgl_changes | length }} volume group(s).
+          No volume group was deleted.
+      when:
+        - _vgl_changes | length > 0
+        - not ansible_check_mode

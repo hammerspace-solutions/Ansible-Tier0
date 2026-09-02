@@ -55,6 +55,42 @@ include_vm_resource_groups:
 # Hammerspace node names.
 plain_host_names: true
 
+# ----------------------------------------------------------------------------
+# Naming hosts by IP so `--limit <ip>` works
+# ----------------------------------------------------------------------------
+# `--limit` matches inventory_hostname and GROUP names only — never
+# `ansible_host`. So `--limit 10.0.16.5` fails with "Could not match supplied
+# host pattern" even though that IP is the host's connection address. (Verified
+# directly: limiting by inventory name or wildcard matches; by IP it does not.)
+#
+# If your automation can only supply IP addresses, uncomment this to make the
+# inventory NAME each host by its private IP. Then this works:
+#
+#   --limit '10.0.16.5,10.0.16.7'
+#
+# hostnames:
+#   - private_ipv4_addresses | first
+#   - default
+#
+# Each entry is a JINJA2 EXPRESSION, not a keyword — see the plugin source
+# comment "change how inventory_hostname is generated. Each item is a jinja2
+# expression similar to hostvar_expressions". So a bare
+# `private_ipv4_addresses` yields the whole LIST as the name; `| first` is
+# required. `default` is a documented special value meaning the plugin's normal
+# hashed name — keep it last so a host with no private IP still appears.
+#
+# NOT verified against a live Azure subscription. Confirm before relying on it:
+#   ansible-inventory -i inventory.azure.yml --graph --flush-cache
+#   ansible-doc -t inventory azure.azcollection.azure_rm | grep -A20 hostnames
+# The plugin caches results, so --flush-cache matters when testing changes.
+#
+# TRADE-OFFS: every host is renamed, so --graph output and log lines lose
+# readable names, and any host_vars/ keyed by name stop matching. On CycleCloud
+# the IP may be no more stable than the name, since nodes are recycled. The
+# simpler alternative that needs no inventory change is a name wildcard —
+# VMSS instances are "<vmss-name>_<instance-id>", and the prefix is stable:
+#   --limit 'hb120v3*'
+
 # auto -> tries env vars, then credential profile, then CLI, then MSI.
 auth_source: auto
 
