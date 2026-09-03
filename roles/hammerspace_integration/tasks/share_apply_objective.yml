@@ -16,7 +16,7 @@
 - name: "Apply objective {{ share_objective_config.objective }} to share {{ share_objective_config.share_name }}"
   ansible.builtin.shell:
     cmd: >-
-      curl -s -o /dev/stdout -w "\n%{http_code}" --max-time {{ hammerspace_api_curl_timeout | default(180) }}
+      curl -s -w "\n%{http_code}" --max-time {{ hammerspace_api_curl_timeout | default(180) }}
       {{ '' if (hammerspace_api_validate_certs | default(false)) else '-k' }}
       -H "Authorization: Basic {{ (hammerspace_api_user ~ ':' ~ hammerspace_api_password) | b64encode }}"
       -X POST -H "Content-Type: application/json"

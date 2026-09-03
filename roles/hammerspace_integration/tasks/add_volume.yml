@@ -86,7 +86,7 @@
 - name: "Check if volume {{ volume_config.path }} already exists"
   ansible.builtin.shell:
     cmd: >-
-      curl -s -o /dev/stdout -w "\n%{http_code}" --max-time 60
+      curl -s -w "\n%{http_code}" --max-time 60
       {{ '' if (hammerspace_api_validate_certs | default(false)) else '-k' }}
       -H "Authorization: Basic {{ (hammerspace_api_user ~ ':' ~ hammerspace_api_password) | b64encode }}"
       "{{ hs_api_url }}/storage-volumes/{{ volume_name | urlencode }}"
@@ -116,7 +116,7 @@
 - name: "Add storage volume {{ volume_config.path }}"
   ansible.builtin.shell:
     cmd: >-
-      curl -s -o /dev/stdout -w "\n%{http_code}" --max-time {{ hammerspace_api_volume_add_timeout | default(1800) }}
+      curl -s -w "\n%{http_code}" --max-time {{ hammerspace_api_volume_add_timeout | default(1800) }}
       {{ '' if (hammerspace_api_validate_certs | default(false)) else '-k' }}
       -H "Authorization: Basic {{ (hammerspace_api_user ~ ':' ~ hammerspace_api_password) | b64encode }}"
       -X POST -H "Content-Type: application/json"

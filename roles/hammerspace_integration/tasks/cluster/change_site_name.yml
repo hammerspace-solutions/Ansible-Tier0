@@ -6,7 +6,7 @@
 - name: "Get current site configuration"
   ansible.builtin.shell:
     cmd: >-
-      curl -s -o /dev/stdout -w "\n%{http_code}" --max-time {{ hammerspace_api_curl_timeout | default(60) }}
+      curl -s -w "\n%{http_code}" --max-time {{ hammerspace_api_curl_timeout | default(60) }}
       {{ '' if (hammerspace_api_validate_certs | default(false)) else '-k' }}
       -H "Authorization: Basic {{ (hammerspace_api_user ~ ':' ~ hammerspace_api_password) | b64encode }}"
       "{{ hs_api_url }}/sites/local"
@@ -33,7 +33,7 @@
 - name: "Update site name to {{ site_config.name }}"
   ansible.builtin.shell:
     cmd: >-
-      curl -s -o /dev/stdout -w "\n%{http_code}" --max-time {{ hammerspace_api_curl_timeout | default(180) }}
+      curl -s -w "\n%{http_code}" --max-time {{ hammerspace_api_curl_timeout | default(180) }}
       {{ '' if (hammerspace_api_validate_certs | default(false)) else '-k' }}
       -H "Authorization: Basic {{ (hammerspace_api_user ~ ':' ~ hammerspace_api_password) | b64encode }}"
       -X PUT -H "Content-Type: application/json"

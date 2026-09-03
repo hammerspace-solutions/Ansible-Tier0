@@ -127,7 +127,7 @@
     - name: Update each affected volume group
       ansible.builtin.shell:
         cmd: >-
-          curl -s -o /dev/stdout -w "\n%{http_code}" --max-time {{ hammerspace_api_curl_timeout | default(180) }}
+          curl -s -w "\n%{http_code}" --max-time {{ hammerspace_api_curl_timeout | default(180) }}
           {{ '' if (hammerspace_api_validate_certs | default(false)) else '-k' }}
           -H "Authorization: Basic {{ (hammerspace_api_user ~ ':' ~ hammerspace_api_password) | b64encode }}"
           -X PUT -H "Content-Type: application/json"
@@ -150,31 +150,59 @@
         # explicitly below rather than PUT to an empty path.
         - item.uuid | length > 0
 
+    # SECURITY: this must NOT loop over _vgl_put.results.
+    #
+    # `no_log: true` on the PUT above protects that task's own output. It does
+    # NOT protect a downstream task that loops over the registered results: for
+    # a looped task Ansible prints the `item`, and here the item is the whole
+    # curl result — including `cmd` and `invocation.module_args._raw_params`,
+    # both of which contain
+    #
+    #     -H "Authorization: Basic <base64 of admin:password>"
+    #
+    # A rejected update therefore wrote the cluster admin credential into
+    # ~/logs, where scripts/run.sh sends every run.
+    #
+    # So the results are reduced to name/status/body FIRST — none of which can
+    # contain the credential — and the failure is reported from a NON-looped
+    # task over that summary.
+    # Loops over INDICES, not over the results themselves. If this task ever
+    # fails, Ansible dumps its `item` — and an item that is an integer cannot
+    # carry the Authorization header, whereas the raw result would.
+    - name: Summarize rejected volume group updates
+      ansible.builtin.set_fact:
+        _vgl_rejected: >-
+          {{ (_vgl_rejected | default([])) + ([{
+               'name':   _r.item.name | default('?'),
+               'uuid':   _r.item.uuid | default(''),
+               'status': (_r.stdout_lines | default(['0']))[-1] | default('0'),
+               'body':   (_r.stdout_lines | default([]))[:-1] | join('\n')
+             }] if _vgl_bad else []) }}
+      vars:
+        _r: "{{ (_vgl_put.results | default([]))[item] }}"
+        _vgl_bad: >-
+          {{ (not (_r.skipped | default(false)))
+             and (((_r.stdout_lines | default(['0']))[-1] | default('0') | int)
+                  not in [200, 201, 202]) }}
+      loop: "{{ range((_vgl_put.results | default([])) | length) | list }}"
+      loop_control:
+        label: "{{ (_vgl_put.results | default([]))[item].item.name | default('?') }}"
+      when: not ansible_check_mode
+
     - name: Fail if any volume group update was rejected
       ansible.builtin.fail:
         msg: |
-          Removing volumes from volume group '{{ item.item.name }}' failed with
-          HTTP {{ (item.stdout_lines | default(['0']))[-1] | default('0') }}.
-
-          PUT {{ hs_api_url }}/volume-groups/{{ item.item.uuid }}
-
-          The API said:
-            {{ (item.stdout_lines | default([]))[:-1] | join('\n  ') | trim | default('(empty response body)', true) }}
-
+          {{ _vgl_rejected | length }} volume group update(s) were rejected.
+          {% for g in _vgl_rejected %}
+          '{{ g.name }}' — HTTP {{ g.status }}
+            PUT {{ hs_api_url }}/volume-groups/{{ g.uuid }}
+            The API said:
+              {{ g.body | trim | default('(empty response body)', true) | replace('\n', '\n    ') }}
+          {% endfor %}
           The volumes have NOT been deleted — decommission stopped here so the
           groups and the volumes stay consistent. Re-run after resolving the
           API error.
-      loop: "{{ _vgl_put.results | default([]) }}"
-      loop_control:
-        label: "{{ item.item.name | default('?') }}"
-      when:
-        - not ansible_check_mode
-        # A skipped item has no stdout_lines, so the default(['0']) below would
-        # read as HTTP 0 and report a rejection for a PUT that never ran. See
-        # the 2026-09-03 (c) loop-skip incident: a `when`-skipped LOOP still
-        # registers one results entry per item.
-        - not (item.skipped | default(false))
-        - ((item.stdout_lines | default(['0']))[-1] | default('0') | int) not in [200, 201, 202]
+      when: (_vgl_rejected | default([])) | length > 0
 
     - name: Report volume group removal complete
       ansible.builtin.debug:

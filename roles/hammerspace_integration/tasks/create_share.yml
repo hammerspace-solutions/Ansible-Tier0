@@ -15,7 +15,7 @@
 - name: "Check if share {{ share_config.name }} already exists"
   ansible.builtin.shell:
     cmd: >-
-      curl -s -o /dev/stdout -w "\n%{http_code}" --max-time {{ hammerspace_api_curl_timeout | default(60) }}
+      curl -s -w "\n%{http_code}" --max-time {{ hammerspace_api_curl_timeout | default(60) }}
       {{ '' if (hammerspace_api_validate_certs | default(false)) else '-k' }}
       -H "Authorization: Basic {{ (hammerspace_api_user ~ ':' ~ hammerspace_api_password) | b64encode }}"
       "{{ hs_api_url }}/shares/{{ share_config.name | urlencode }}"
@@ -33,7 +33,7 @@
 - name: "Create share {{ share_config.name }}"
   ansible.builtin.shell:
     cmd: >-
-      curl -s -o /dev/stdout -w "\n%{http_code}" --max-time {{ hammerspace_api_curl_timeout | default(180) }}
+      curl -s -w "\n%{http_code}" --max-time {{ hammerspace_api_curl_timeout | default(180) }}
       {{ '' if (hammerspace_api_validate_certs | default(false)) else '-k' }}
       -H "Authorization: Basic {{ (hammerspace_api_user ~ ':' ~ hammerspace_api_password) | b64encode }}"
       -X POST -H "Content-Type: application/json"
@@ -98,7 +98,7 @@
     - name: "Get current share details"
       ansible.builtin.shell:
         cmd: >-
-          curl -s -o /dev/stdout -w "\n%{http_code}" --max-time {{ hammerspace_api_curl_timeout | default(60) }}
+          curl -s -w "\n%{http_code}" --max-time {{ hammerspace_api_curl_timeout | default(60) }}
           {{ '' if (hammerspace_api_validate_certs | default(false)) else '-k' }}
           -H "Authorization: Basic {{ (hammerspace_api_user ~ ':' ~ hammerspace_api_password) | b64encode }}"
           "{{ hs_api_url }}/shares/{{ share_config.name | urlencode }}"
@@ -121,7 +121,7 @@
     - name: "Update share {{ share_config.name }}"
       ansible.builtin.shell:
         cmd: >-
-          curl -s -o /dev/stdout -w "\n%{http_code}" --max-time {{ hammerspace_api_curl_timeout | default(180) }}
+          curl -s -w "\n%{http_code}" --max-time {{ hammerspace_api_curl_timeout | default(180) }}
           {{ '' if (hammerspace_api_validate_certs | default(false)) else '-k' }}
           -H "Authorization: Basic {{ (hammerspace_api_user ~ ':' ~ hammerspace_api_password) | b64encode }}"
           -X PUT -H "Content-Type: application/json"

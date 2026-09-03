@@ -15,7 +15,7 @@
 - name: Check if DI node already exists in Hammerspace
   ansible.builtin.shell:
     cmd: >-
-      curl -s -o /dev/stdout -w "\n%{http_code}" --max-time 30
+      curl -s -w "\n%{http_code}" --max-time 30
       {{ '' if (hammerspace_api_validate_certs | default(false)) else '-k' }}
       -H "Authorization: Basic {{ (hammerspace_api_user ~ ':' ~ hammerspace_api_password) | b64encode }}"
       "https://{{ hammerspace_cluster_mgmt_ip | default(hammerspace_api_host) }}:{{ hammerspace_api_port | default(8443) }}/mgmt/v1.2/rest/nodes/{{ _di_node_name | urlencode }}"
