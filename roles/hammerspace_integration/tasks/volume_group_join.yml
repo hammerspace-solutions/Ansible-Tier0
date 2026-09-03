@@ -120,12 +120,44 @@
                   '{{ hs_api_url }}/volume-groups/{{ hammerspace_volume_group | urlencode }}' | jq .
           when: _vg_uuid | length == 0
 
+        # `selectattr('storageVolume.name', 'defined')` is load-bearing.
+        #
+        # Not every entry in `locations` names a storage volume. A group can
+        # carry pattern-based or otherwise-shaped entries, and mapping
+        # 'storageVolume.name' over those raises
+        #
+        #   'dict object' has no attribute 'storageVolume'
+        #
+        # which is a hard failure on a group that is perfectly valid.
+        #
+        # Unrecognised entries are EXCLUDED from the name comparison but kept
+        # verbatim in _vg_existing_locations, so the PUT payload still carries
+        # them. Filtering here decides what we compare; it must never decide
+        # what we write back.
         - name: Determine which volumes are not yet members
           ansible.builtin.set_fact:
             _vg_existing_locations: "{{ _vg_json.expressions[0].locations | default([]) }}"
             _vg_existing_names: >-
               {{ _vg_json.expressions[0].locations | default([])
+                 | selectattr('storageVolume.name', 'defined')
                  | map(attribute='storageVolume.name') | list }}
+
+        # Surfaced rather than silently tolerated: if a group holds entries we
+        # cannot name, the membership comparison below is only as complete as
+        # the entries it could read, and an operator should know that.
+        - name: Note volume group entries that name no storage volume
+          ansible.builtin.debug:
+            msg: >-
+              Volume group '{{ hammerspace_volume_group }}' holds
+              {{ _vg_opaque | length }} location entry/entries with no
+              storageVolume.name. They are preserved verbatim in the update but
+              excluded from the membership comparison. Types seen:
+              {{ _vg_opaque | map(attribute='_type') | list | unique | join(', ') | default('(no _type)', true) }}
+          vars:
+            _vg_opaque: >-
+              {{ _vg_existing_locations
+                 | rejectattr('storageVolume.name', 'defined') | list }}
+          when: _vg_opaque | length > 0
 
         - name: Compute the additions
           ansible.builtin.set_fact:
@@ -237,7 +269,8 @@
               ansible.builtin.set_fact:
                 _vg_final_names: >-
                   {{ (_vg_verify_raw.stdout | default('{}') | from_json).expressions[0].locations
-                     | default([]) | map(attribute='storageVolume.name') | list }}
+                     | default([]) | selectattr('storageVolume.name', 'defined')
+                     | map(attribute='storageVolume.name') | list }}
               when: not ansible_check_mode
 
             - name: Fail if any expected member is missing after the update

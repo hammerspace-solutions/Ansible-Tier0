@@ -46,7 +46,13 @@
 
     - name: "Check if volume {{ volume_group_update.volume_name }} already in group"
       ansible.builtin.set_fact:
-        _volume_already_in_group: "{{ _vg_existing_locations | selectattr('storageVolume.name', 'equalto', volume_group_update.volume_name) | list | length > 0 }}"
+        # 'defined' first: an entry that names no storage volume raises
+        # "'dict object' has no attribute 'storageVolume'" otherwise.
+        _volume_already_in_group: >-
+          {{ _vg_existing_locations
+             | selectattr('storageVolume.name', 'defined')
+             | selectattr('storageVolume.name', 'equalto', volume_group_update.volume_name)
+             | list | length > 0 }}
 
     - name: "Skip volume group update (volume already in group)"
       ansible.builtin.debug:

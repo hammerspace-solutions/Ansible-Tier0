@@ -65,6 +65,12 @@
               storageVolume:
                 _type: "STORAGE_VOLUME"
                 name: "AZ1:node-1::/nvme/tier0"
+            # Not every location names a storage volume. Mapping
+            # 'storageVolume.name' over this entry is what produced
+            # "'dict object' has no attribute 'storageVolume'".
+            - _type: "VOLUME_LOCATION"
+              extendedInfo: {}
+              namePattern: "AZ2:*"
 
   tasks:
     # ========================================================================
@@ -189,10 +195,12 @@
               - _payload.uoid.uuid == '91b88e1a-08bb-4c92-a739-3cb82b106228'
               - _payload.internalId == 42
               - _payload.objectStoreLogicalVolumeExpression == 'keep-me'
-              # Append-only: the existing member is still first.
-              - _payload.expressions[0].locations | length == 2
+              # Append-only: existing entries keep their order and position,
+              # including the one that names no storage volume.
+              - _payload.expressions[0].locations | length == 3
               - _payload.expressions[0].locations[0].storageVolume.name == 'AZ1:node-1::/nvme/tier0'
-              - _payload.expressions[0].locations[1].storageVolume.name == 'AZ1:node-2::/nvme/tier0'
+              - _payload.expressions[0].locations[1].namePattern == 'AZ2:*'
+              - _payload.expressions[0].locations[2].storageVolume.name == 'AZ1:node-2::/nvme/tier0'
               - _payload.expressions[0].operator == 'IN'
             fail_msg: |
               The PUT payload does not round-trip the fetched object. A PUT
@@ -271,6 +279,123 @@
         - name: Record TEST 3 failure
           ansible.builtin.set_fact:
             _test_failures: "{{ _test_failures + ['TEST 3: ' ~ (ansible_failed_result.msg | default('unknown') | replace('\n', ' '))] }}"
+
+    # ========================================================================
+    # TEST 4: a location entry that names no storage volume must not crash the
+    # membership comparison, and must survive the PUT.
+    #
+    #   TASK [hammerspace_integration : Determine which volumes are not yet members]
+    #   fatal: [172.20.16.5]: FAILED!
+    #     The task includes an option with an undefined variable. The error
+    #     was: 'dict object' has no attribute 'storageVolume'
+    #
+    # The filter decides what is COMPARED. It must never decide what is
+    # WRITTEN BACK — dropping an unrecognised entry from the payload would
+    # delete it from the group, since a PUT replaces the resource.
+    # ========================================================================
+    - name: 'TEST 4: locations without storageVolume are tolerated and preserved'
+      block:
+        - name: Extract member names the way join.yml does
+          ansible.builtin.set_fact:
+            _names: >-
+              {{ _vg_fetched.expressions[0].locations
+                 | selectattr('storageVolume.name', 'defined')
+                 | map(attribute='storageVolume.name') | list }}
+            _locations: "{{ _vg_fetched.expressions[0].locations }}"
+
+        - name: 'TEST 4 ASSERT: only the nameable entry is compared'
+          ansible.builtin.assert:
+            that:
+              - _names == ['AZ1:node-1::/nvme/tier0']
+            fail_msg: |
+              Name extraction did not skip the entry with no storageVolume.
+              Unguarded this raises "'dict object' has no attribute
+              'storageVolume'" and fails a perfectly valid group.
+              Got: {{ _names }}
+
+        - name: Build the payload the way join.yml does
+          ansible.builtin.set_fact:
+            _payload4: >-
+              {{ _vg_fetched | combine({'expressions':
+                   [ (_vg_fetched.expressions | first)
+                     | combine({'operator': 'IN', 'locations': _new}) ]}) }}
+          vars:
+            _new: >-
+              {{ _locations + [{'_type': 'VOLUME_LOCATION',
+                                'storageVolume': {'_type': 'STORAGE_VOLUME',
+                                                  'name': 'AZ1:node-2::/nvme/tier0'}}] }}
+
+        - name: 'TEST 4 ASSERT: the unnameable entry survives the PUT payload'
+          ansible.builtin.assert:
+            that:
+              - _payload4.expressions[0].locations | length == 3
+              # Preserved verbatim, in place, not dropped by the filter.
+              - _payload4.expressions[0].locations[1].namePattern == 'AZ2:*'
+              - _payload4.expressions[0].locations[2].storageVolume.name == 'AZ1:node-2::/nvme/tier0'
+            fail_msg: |
+              An entry with no storageVolume was dropped from the PUT payload.
+              A PUT REPLACES the resource, so filtering it out of the payload
+              deletes it from the group. Filter what is COMPARED, never what is
+              written back.
+              Got: {{ _payload4.expressions[0].locations }}
+
+        - name: Compute a removal plan the way leave.yml does
+          ansible.builtin.set_fact:
+            _keep: "{{ _locations | reject('in', _remove_locs) | list }}"
+            _remove: "{{ _remove_locs | map(attribute='storageVolume.name') | list }}"
+          vars:
+            _remove_locs: >-
+              {{ _locations | selectattr('storageVolume.name', 'defined')
+                 | selectattr('storageVolume.name', 'in',
+                              ['AZ1:node-1::/nvme/tier0']) | list }}
+
+        - name: 'TEST 4 ASSERT: removal keeps the unnameable entry'
+          ansible.builtin.assert:
+            that:
+              - _remove == ['AZ1:node-1::/nvme/tier0']
+              # The pattern entry is not a volume being decommissioned, so it
+              # must be retained rather than quietly removed with the volume.
+              - _keep | length == 1
+              - _keep[0].namePattern == 'AZ2:*'
+            fail_msg: |
+              The removal plan mishandled an entry with no storageVolume.
+              keep={{ _keep }} remove={{ _remove }}
+
+        # Expression-level audit. A line-scoped grep reports false positives
+        # (the guard usually sits on the line above the access), and per-FILE
+        # presence is too coarse to notice one guard of several going missing
+        # — both were tried. The helper parses each Jinja expression and
+        # requires the guard to PRECEDE the access within it.
+        - name: Audit storageVolume.name guards in the writers
+          ansible.builtin.command:
+            argv: >-
+              {{ ['python3', playbook_dir ~ '/check_storagevolume_guards.py']
+                 + (_writers | map('regex_replace', '^', playbook_dir ~ '/../../') | list) }}
+          register: _sv_audit
+          changed_when: false
+          failed_when: false
+          check_mode: false
+
+        - name: 'TEST 4 ASSERT: every storageVolume.name access is guarded'
+          ansible.builtin.assert:
+            that:
+              - _sv_audit.rc == 0
+            fail_msg: |
+              REGRESSION: unguarded storageVolume.name access(es).
+
+              {{ _sv_audit.stdout }}
+
+              Each raises "'dict object' has no attribute 'storageVolume'" on
+              a group holding an entry that names no volume — a valid group
+              the playbook then refuses to touch.
+
+        - name: Record TEST 4 pass
+          ansible.builtin.set_fact:
+            _test_passes: "{{ _test_passes + ['TEST 4: locations without storageVolume are skipped in comparison and preserved in the payload'] }}"
+      rescue:
+        - name: Record TEST 4 failure
+          ansible.builtin.set_fact:
+            _test_failures: "{{ _test_failures + ['TEST 4: ' ~ (ansible_failed_result.msg | default('unknown') | replace('\n', ' '))] }}"
 
     # ========================================================================
     # Report

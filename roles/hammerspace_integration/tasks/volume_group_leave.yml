@@ -43,6 +43,17 @@
       ansible.builtin.set_fact:
         _vgl_all: "{{ (_vgl_all_raw.stdout | default('[]') | trim | default('[]', true)) | from_json }}"
 
+    # `keep` is built by REJECTING the entries being removed from the original
+    # list, not by selecting the ones to retain. Two reasons:
+    #
+    #   - order is preserved, so the PUT does not reshuffle the group;
+    #   - entries with no storageVolume.name survive. Not every location names
+    #     a storage volume, and a bare rejectattr('storageVolume.name', ...)
+    #     raises "'dict object' has no attribute 'storageVolume'" on a group
+    #     that is perfectly valid. Such an entry is by definition not a volume
+    #     being decommissioned, so it must be kept.
+    #
+    # `_remove_locs` filters on 'defined' FIRST for the same reason.
     - name: Build the per-group removal plan
       ansible.builtin.set_fact:
         _vgl_plan: >-
@@ -50,12 +61,17 @@
                'name': item.name,
                'uuid': item.uoid.uuid | default(''),
                'obj': item,
-               'keep': (item.expressions[0].locations | default([]))
-                       | rejectattr('storageVolume.name', 'in', _vgl_volumes) | list,
-               'remove': (item.expressions[0].locations | default([]))
-                         | selectattr('storageVolume.name', 'in', _vgl_volumes)
+               'keep': _vgl_locs | reject('in', _vgl_remove_locs) | list,
+               'remove': _vgl_remove_locs
+                         | selectattr('storageVolume.name', 'defined')
                          | map(attribute='storageVolume.name') | list
              }] }}
+      vars:
+        _vgl_locs: "{{ item.expressions[0].locations | default([]) }}"
+        _vgl_remove_locs: >-
+          {{ (item.expressions[0].locations | default([]))
+             | selectattr('storageVolume.name', 'defined')
+             | selectattr('storageVolume.name', 'in', _vgl_volumes) | list }}
       loop: "{{ _vgl_all | selectattr('expressions', 'defined') | list }}"
       loop_control:
         label: "{{ item.name | default('?') }}"
@@ -101,7 +117,7 @@
           {% for v in g.remove %}      - {{ v }}
           {% endfor %}
               keeping  ({{ g.keep | length }}):
-          {% for v in g.keep | map(attribute='storageVolume.name') | list %}      = {{ v }}
+          {% for v in g.keep | selectattr('storageVolume.name', 'defined') | map(attribute='storageVolume.name') | list %}      = {{ v }}
           {% endfor %}
           {% endfor %}
       when: _vgl_changes | length > 0
