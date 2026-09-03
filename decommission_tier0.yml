@@ -6,9 +6,14 @@
 #
 # Reverses the Hammerspace-side registration performed by site.yml:
 #   1. Find the node's storage volumes via the Hammerspace API
-#   2. Remove those volumes from every volume group that holds them
-#   3. Delete the volumes
-#   4. Delete the node
+#   2. Delete the volumes — which also removes them from any volume group
+#   3. Delete the node
+#   4. Verify no volume group still references a deleted volume
+#
+# Deleting a volume removes it from its volume groups, so this playbook does
+# NOT rewrite the groups first. It confirms the cascade happened instead. Set
+# decommission_explicit_volume_group_leave=true to restore the old behaviour
+# of removing memberships with an explicit PUT before the delete.
 #
 # WHAT THIS PLAYBOOK DOES NOT DO — by design:
 #   - it does not unmount anything
@@ -297,8 +302,10 @@
       run_once: true
 
     # ------------------------------------------------------------------ #
-    # 1. Leave volume groups FIRST, so no group is left holding a dangling
-    #    reference to a volume that is about to disappear.
+    # 1. Volume group membership.
+    #
+    #    Handled by the delete itself (see below); the explicit PUT path is
+    #    opt-in and the cascade is verified after the delete.
     # ------------------------------------------------------------------ #
     - name: Fail if no target node names could be resolved
       ansible.builtin.fail:
@@ -313,13 +320,26 @@
       delegate_to: localhost
       run_once: true
 
+    # Deleting a storage volume removes it from every volume group that holds
+    # it — confirmed against the API on 2026-09-03. The explicit read-modify-
+    # write PUT this used to perform was therefore redundant, and it was also
+    # the fragile step: a PUT has to round-trip the whole group object, which
+    # embeds the expanded volumes, and getting that wrong risks erasing the
+    # group's placement objectives.
+    #
+    # So the default is to let the delete cascade and VERIFY afterwards rather
+    # than to pre-emptively rewrite the groups. The old path is kept behind a
+    # flag for a cluster whose API does not cascade; if the verification below
+    # ever fires, that is the flag to set.
     - name: Remove the volumes from every volume group that holds them
       ansible.builtin.include_role:
         name: hammerspace_integration
         tasks_from: volume_group_leave
       vars:
         _vgl_volumes: "{{ _dc_volumes }}"
-      when: _dc_volumes | length > 0
+      when:
+        - _dc_volumes | length > 0
+        - decommission_explicit_volume_group_leave | default(false) | bool
 
     # ------------------------------------------------------------------ #
     # 2 + 3. Delete volumes, then nodes.
@@ -364,6 +384,101 @@
         - _dc_cleanup.stdout is defined
       delegate_to: localhost
       run_once: true
+
+    # ------------------------------------------------------------------ #
+    # 4. Verify the cascade. The whole point of the old pre-emptive PUT was
+    #    that no volume group should be left referencing a volume that no
+    #    longer exists. Relying on the delete to do it is fine; relying on it
+    #    WITHOUT CHECKING is not, so the safety property is now verified
+    #    rather than assumed.
+    #
+    #    Skipped under --check: nothing was deleted, so every volume is still
+    #    a member and the check would fail on a simulation.
+    # ------------------------------------------------------------------ #
+    - name: Verify no volume group still references a deleted volume
+      when:
+        - not ansible_check_mode
+        - _dc_volumes | length > 0
+      delegate_to: localhost
+      run_once: true
+      become: false
+      block:
+        - name: Re-read every volume group
+          ansible.builtin.shell:
+            cmd: >-
+              curl -s -w "\n%{http_code}" --max-time {{ hammerspace_api_curl_timeout | default(60) }}
+              {{ '' if (hammerspace_api_validate_certs | default(false)) else '-k' }}
+              -H "Authorization: Basic {{ (hammerspace_api_user ~ ':' ~ hammerspace_api_password) | b64encode }}"
+              "{{ hs_api_url }}/volume-groups"
+          register: _dc_vg_raw
+          changed_when: false
+          failed_when: false
+          check_mode: false
+          no_log: true
+
+        - name: Parse the volume group list
+          ansible.builtin.set_fact:
+            _dc_vg_status: "{{ (_dc_vg_raw.stdout_lines | default(['0']))[-1] | default('0') }}"
+            _dc_vg_all: >-
+              {{ ((_dc_vg_raw.stdout_lines | default(['[]']))[:-1]
+                  | join('\n') | trim | default('[]', true)) | from_json }}
+
+        - name: Warn if the volume groups could not be re-read
+          ansible.builtin.debug:
+            msg: >-
+              Could not re-read volume groups (HTTP {{ _dc_vg_status }}), so the
+              cascade was not verified. The volumes and nodes ARE deleted. Check
+              group membership by hand:
+              curl -sk -u '{{ hammerspace_api_user }}:<password>'
+              '{{ hs_api_url }}/volume-groups' | jq -r '.[].name'
+          when: _dc_vg_status | int != 200
+
+        - name: Collect any remaining references to the deleted volumes
+          ansible.builtin.set_fact:
+            _dc_dangling: >-
+              {{ (_dc_dangling | default([])) +
+                 ((item.expressions[0].locations | default([]))
+                  | selectattr('storageVolume.name', 'defined')
+                  | selectattr('storageVolume.name', 'in', _dc_volumes)
+                  | map(attribute='storageVolume.name')
+                  | map('regex_replace', '^(.*)$', (item.name | default('?')) ~ ' still holds \\1')
+                  | list) }}
+          loop: "{{ _dc_vg_all | selectattr('expressions', 'defined') | list }}"
+          loop_control:
+            label: "{{ item.name | default('?') }}"
+          when: _dc_vg_status | int == 200
+
+        - name: Report the volume groups are clean
+          ansible.builtin.debug:
+            msg: >-
+              Verified: no volume group references any of the
+              {{ _dc_volumes | length }} deleted volume(s). The delete removed
+              the memberships.
+          when:
+            - _dc_vg_status | int == 200
+            - (_dc_dangling | default([])) | length == 0
+
+        # Not fatal: the volumes and nodes are already gone, so failing here
+        # would just make a completed decommission look unfinished. It is loud
+        # instead, and names the flag that restores the explicit removal.
+        - name: Warn if any volume group kept a reference
+          ansible.builtin.debug:
+            msg: |
+              WARNING: {{ _dc_dangling | length }} volume group reference(s)
+              survived the delete on this cluster:
+              {% for d in _dc_dangling %}
+                - {{ d }}
+              {% endfor %}
+
+              The volumes and nodes ARE deleted; only the group membership is
+              stale. This cluster's API does not cascade, so re-run future
+              decommissions with:
+
+                -e decommission_explicit_volume_group_leave=true
+
+              To clear the stale entries now, run the same flag against the
+              already-deleted volumes, or remove them in the UI.
+          when: (_dc_dangling | default([])) | length > 0
 
     - name: Fail if volume or node deletion reported an error
       ansible.builtin.fail:

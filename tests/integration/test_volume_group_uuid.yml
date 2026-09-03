@@ -398,6 +398,173 @@
             _test_failures: "{{ _test_failures + ['TEST 4: ' ~ (ansible_failed_result.msg | default('unknown') | replace('\n', ' '))] }}"
 
     # ========================================================================
+    # TEST 5: the round-tripped payload must not be inlined in the shell
+    # command. It embeds the group's expanded volumes/nodes/logical volumes,
+    # so -d '<json>' places tens of kilobytes of arbitrary API-controlled text
+    # inside shell single quotes. One apostrophe ends the quoting and curl is
+    # never executed:
+    #
+    #   'vg-tier0' — HTTP 0
+    #     The API said: (empty response body)
+    #
+    # HTTP 0 with no body is the signature: -w always emits a code when curl
+    # actually runs, so no output at all means the command did not run.
+    # ========================================================================
+    - name: 'TEST 5: volume group payloads are passed as -d @file'
+      block:
+        - name: Look for inlined JSON payloads in the writers
+          ansible.builtin.shell:
+            cmd: >-
+              cd {{ (playbook_dir ~ '/../..') | quote }} && grep -n -- "-d '{{ '{' ~ '{' }}" {{ _writers | map('quote') | join(' ') }} || true
+          register: _inline
+          changed_when: false
+          check_mode: false
+
+        - name: 'TEST 5 ASSERT: no writer inlines its payload'
+          ansible.builtin.assert:
+            that:
+              - (_inline.stdout | trim) | length == 0
+            fail_msg: |
+              REGRESSION: a volume-group writer inlines its JSON payload into
+              the curl command line:
+
+              {{ _inline.stdout }}
+
+              The payload round-trips the fetched object, so it is large and
+              contains arbitrary API-controlled strings. A single apostrophe
+              in any of it terminates the shell quoting and curl never runs —
+              reported as HTTP 0 with an empty body. Write it to a file and
+              pass -d @file.
+
+        - name: Check each writer uses -d @ and cleans the file up
+          ansible.builtin.shell:
+            cmd: >-
+              cd {{ (playbook_dir ~ '/../..') | quote }} && grep -L -- "-d @" {{ _writers | map('quote') | join(' ') }} || true
+          register: _no_at
+          changed_when: false
+          check_mode: false
+
+        - name: 'TEST 5 ASSERT: every writer passes -d @file'
+          ansible.builtin.assert:
+            that:
+              - (_no_at.stdout | trim) | length == 0
+            fail_msg: |
+              These writers do not pass their payload as -d @file:
+              {{ _no_at.stdout }}
+
+        - name: Check the payload files are removed
+          ansible.builtin.shell:
+            cmd: >-
+              cd {{ (playbook_dir ~ '/../..') | quote }} && grep -L "state: absent" {{ _writers | map('quote') | join(' ') }} || true
+          register: _no_cleanup
+          changed_when: false
+          check_mode: false
+
+        - name: 'TEST 5 ASSERT: payload files are cleaned up'
+          ansible.builtin.assert:
+            that:
+              - (_no_cleanup.stdout | trim) | length == 0
+            fail_msg: |
+              These writers never remove their payload file:
+              {{ _no_cleanup.stdout }}
+
+              Cleanup must also come BEFORE the rejection check, which is a
+              hard failure — a removal task placed after it is skipped on
+              exactly the runs that created the file.
+
+        - name: 'TEST 5 ASSERT: an HTTP 0 result is explained, not just printed'
+          ansible.builtin.shell:
+            cmd: >-
+              cd {{ (playbook_dir ~ '/../..') | quote }} && grep -L "curl exit" {{ _writers | map('quote') | join(' ') }} || true
+          register: _no_rc
+          changed_when: false
+          check_mode: false
+
+        - name: 'TEST 5 ASSERT: the failure message reports curl exit code'
+          ansible.builtin.assert:
+            that:
+              - (_no_rc.stdout | trim) | length == 0
+            fail_msg: |
+              These writers report an HTTP status without curl's exit code:
+              {{ _no_rc.stdout }}
+
+              HTTP 0 means curl produced no output; only the exit code and
+              stderr distinguish "never ran" from "killed" from "connection
+              refused".
+
+        - name: Record TEST 5 pass
+          ansible.builtin.set_fact:
+            _test_passes: "{{ _test_passes + ['TEST 5: payloads passed as -d @file, cleaned up, and HTTP 0 reports curl exit + stderr'] }}"
+      rescue:
+        - name: Record TEST 5 failure
+          ansible.builtin.set_fact:
+            _test_failures: "{{ _test_failures + ['TEST 5: ' ~ (ansible_failed_result.msg | default('unknown') | replace('\n', ' '))] }}"
+
+    # ========================================================================
+    # TEST 6: decommission relies on the delete cascading volume group
+    # membership (confirmed against the API 2026-09-03), so it must not run
+    # the explicit PUT by default — but it must still VERIFY the cascade.
+    # Dropping the check along with the PUT would silently give up the safety
+    # property the PUT existed for: no group left referencing a deleted volume.
+    # ========================================================================
+    - name: 'TEST 6: decommission verifies the cascade instead of pre-emptying'
+      block:
+        - name: Read the decommission playbook
+          ansible.builtin.slurp:
+            src: "{{ playbook_dir }}/../../decommission_tier0.yml"
+          register: _dc_src
+
+        - name: Decode
+          ansible.builtin.set_fact:
+            _dc_raw: "{{ _dc_src.content | b64decode }}"
+
+        - name: 'TEST 6 ASSERT: the explicit PUT path is opt-in'
+          ansible.builtin.assert:
+            that:
+              - "'tasks_from: volume_group_leave' in _dc_raw"
+              - "'decommission_explicit_volume_group_leave' in _dc_raw"
+            fail_msg: |
+              decommission_tier0.yml must still be ABLE to remove memberships
+              explicitly — a cluster whose API does not cascade needs it — but
+              gated behind decommission_explicit_volume_group_leave, default
+              false.
+
+        - name: 'TEST 6 ASSERT: the cascade is verified after the delete'
+          ansible.builtin.assert:
+            that:
+              # The safety property survives the simplification.
+              - "'Verify no volume group still references a deleted volume' in _dc_raw"
+              - "'_dc_dangling' in _dc_raw"
+              # Verification must be skipped under --check: nothing was
+              # deleted, so every volume is still a member.
+              - "'not ansible_check_mode' in _dc_raw"
+            fail_msg: |
+              REGRESSION: the explicit volume-group removal was dropped without
+              a verification replacing it. The PUT existed to guarantee no
+              group is left referencing a deleted volume; relying on the
+              cascade is fine, relying on it WITHOUT CHECKING is not.
+
+        - name: 'TEST 6 ASSERT: a surviving reference warns, not fails'
+          ansible.builtin.assert:
+            that:
+              # The volumes and nodes are already gone by then; failing would
+              # make a completed decommission look unfinished.
+              - "'WARNING' in _dc_raw"
+              - "'decommission_explicit_volume_group_leave=true' in _dc_raw"
+            fail_msg: |
+              A surviving group reference must be reported loudly and name the
+              flag that restores the explicit removal — but it must not fail
+              the play, because the deletion it follows has already happened.
+
+        - name: Record TEST 6 pass
+          ansible.builtin.set_fact:
+            _test_passes: "{{ _test_passes + ['TEST 6: decommission lets the delete cascade, gates the PUT behind a flag, and verifies afterwards'] }}"
+      rescue:
+        - name: Record TEST 6 failure
+          ansible.builtin.set_fact:
+            _test_failures: "{{ _test_failures + ['TEST 6: ' ~ (ansible_failed_result.msg | default('unknown') | replace('\n', ' '))] }}"
+
+    # ========================================================================
     # Report
     # ========================================================================
     - name: Print test report

@@ -93,6 +93,29 @@
              | default({'_type': 'EXPRESSION'}, true) }}
       when: not _volume_already_in_group
 
+    # Payload in a FILE, not on the command line: it round-trips the whole
+    # fetched volume group object, so inlining it puts tens of kilobytes of
+    # arbitrary API-controlled text inside shell single quotes. One apostrophe
+    # ends the quoting and curl never runs, which surfaces as "HTTP 0" with an
+    # empty body because -w always emits a code when curl does run.
+    - name: "Create the volume group payload file"
+      ansible.builtin.tempfile:
+        state: file
+        suffix: .json
+      register: _vg_add_payload_file
+      when:
+        - not _volume_already_in_group
+        - not ansible_check_mode
+
+    - name: "Populate the volume group payload file"
+      ansible.builtin.copy:
+        content: "{{ _vg_update_payload | to_json }}"
+        dest: "{{ _vg_add_payload_file.path }}"
+        mode: "0600"
+      when:
+        - not _volume_already_in_group
+        - not ansible_check_mode
+
     - name: "Update volume group {{ volume_group_update.group_name }} with new volume"
       ansible.builtin.shell:
         cmd: >-
@@ -100,7 +123,7 @@
           {{ '' if (hammerspace_api_validate_certs | default(false)) else '-k' }}
           -H "Authorization: Basic {{ (hammerspace_api_user ~ ':' ~ hammerspace_api_password) | b64encode }}"
           -X PUT -H "Content-Type: application/json"
-          -d '{{ _vg_update_payload | to_json }}'
+          -d @{{ _vg_add_payload_file.path | quote }}
           "{{ hs_api_url }}/volume-groups/{{ _vg_add_uuid | urlencode }}"
       register: vg_update_result
       changed_when: true
@@ -110,6 +133,15 @@
         - not _volume_already_in_group
         - not ansible_check_mode
 
+    - name: "Remove the volume group payload file"
+      ansible.builtin.file:
+        path: "{{ _vg_add_payload_file.path }}"
+        state: absent
+      when:
+        - not _volume_already_in_group
+        - not ansible_check_mode
+        - _vg_add_payload_file.path is defined
+
     # The result used to go unchecked: the status line was never read, so a
     # rejected PUT still reported "added to volume group" below and the volume
     # was quietly left out of the group.
@@ -118,7 +150,8 @@
         msg: |
           Adding volume '{{ volume_group_update.volume_name }}' to volume group
           '{{ volume_group_update.group_name }}' failed with HTTP
-          {{ (vg_update_result.stdout_lines | default(['0']))[-1] | default('0') }}.
+          {{ (vg_update_result.stdout_lines | default(['0']))[-1] | default('0') }}
+          (curl exit {{ vg_update_result.rc | default('?') }}).
 
           PUT {{ hs_api_url }}/volume-groups/{{ _vg_add_uuid }}
 

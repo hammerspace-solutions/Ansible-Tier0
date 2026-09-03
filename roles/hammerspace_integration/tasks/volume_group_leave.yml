@@ -124,6 +124,41 @@
 
     # The group itself is never deleted, even when it ends up empty — it may
     # carry placement objectives that other deployments will populate later.
+    # The payload goes in a FILE, not on the command line.
+    #
+    # It is the whole volume group object round-tripped (so a PUT, which
+    # REPLACES the resource, cannot drop placement objectives), and that object
+    # embeds the expanded volumes, their nodes and logical volumes. Inlining
+    # that as -d '<json>' put tens of kilobytes of arbitrary API-controlled
+    # text inside shell single quotes: one apostrophe anywhere in it ends the
+    # quoting and the shell never runs curl at all. The symptom is a curl that
+    # produced NO stdout — reported as "HTTP 0 / (empty response body)", since
+    # -w always emits a code when curl actually runs.
+    #
+    # -d @file sidesteps shell quoting and any ARG_MAX ceiling entirely.
+    - name: Create a temporary directory for the volume group payloads
+      ansible.builtin.tempfile:
+        state: directory
+        suffix: hs-vg
+      register: _vgl_tmp
+      when: not ansible_check_mode
+
+    - name: Write each volume group payload to a file
+      ansible.builtin.copy:
+        content: >-
+          {{ item.obj | combine({'expressions':
+               [ ((item.obj.expressions | default([])) | first
+                  | default({'_type': 'EXPRESSION'}, true))
+                 | combine({'operator': 'IN', 'locations': item.keep}) ]}) | to_json }}
+        dest: "{{ _vgl_tmp.path }}/{{ item.uuid }}.json"
+        mode: "0600"
+      loop: "{{ _vgl_changes }}"
+      loop_control:
+        label: "{{ item.name }}"
+      when:
+        - not ansible_check_mode
+        - item.uuid | length > 0
+
     - name: Update each affected volume group
       ansible.builtin.shell:
         cmd: >-
@@ -131,10 +166,7 @@
           {{ '' if (hammerspace_api_validate_certs | default(false)) else '-k' }}
           -H "Authorization: Basic {{ (hammerspace_api_user ~ ':' ~ hammerspace_api_password) | b64encode }}"
           -X PUT -H "Content-Type: application/json"
-          -d '{{ item.obj | combine({'expressions':
-                  [ ((item.obj.expressions | default([])) | first
-                     | default({'_type': 'EXPRESSION'}, true))
-                    | combine({'operator': 'IN', 'locations': item.keep}) ]}) | to_json }}'
+          -d @{{ (_vgl_tmp.path ~ '/' ~ item.uuid ~ '.json') | quote }}
           "{{ hs_api_url }}/volume-groups/{{ item.uuid | urlencode }}"
       register: _vgl_put
       changed_when: true
@@ -149,6 +181,17 @@
         # group the API returned without one cannot be addressed. Caught
         # explicitly below rather than PUT to an empty path.
         - item.uuid | length > 0
+
+    # Immediately after the PUT, not at the end of the play: the rejection
+    # check below is a hard failure, and cleanup placed after it would be
+    # skipped on exactly the runs that created the files.
+    - name: Remove the payload directory
+      ansible.builtin.file:
+        path: "{{ _vgl_tmp.path }}"
+        state: absent
+      when:
+        - not ansible_check_mode
+        - _vgl_tmp.path is defined
 
     # SECURITY: this must NOT loop over _vgl_put.results.
     #
@@ -176,7 +219,9 @@
                'name':   _r.item.name | default('?'),
                'uuid':   _r.item.uuid | default(''),
                'status': (_r.stdout_lines | default(['0']))[-1] | default('0'),
-               'body':   (_r.stdout_lines | default([]))[:-1] | join('\n')
+               'body':   (_r.stdout_lines | default([]))[:-1] | join('\n'),
+               'rc':     _r.rc | default('?'),
+               'stderr': (_r.stderr | default('')) | regex_replace('Basic [A-Za-z0-9+/=]+', 'Basic <redacted>')
              }] if _vgl_bad else []) }}
       vars:
         _r: "{{ (_vgl_put.results | default([]))[item] }}"
@@ -194,10 +239,22 @@
         msg: |
           {{ _vgl_rejected | length }} volume group update(s) were rejected.
           {% for g in _vgl_rejected %}
-          '{{ g.name }}' — HTTP {{ g.status }}
+          '{{ g.name }}' — HTTP {{ g.status }} (curl exit {{ g.rc }})
             PUT {{ hs_api_url }}/volume-groups/{{ g.uuid }}
             The API said:
               {{ g.body | trim | default('(empty response body)', true) | replace('\n', '\n    ') }}
+          {% if (g.stderr | trim) | length > 0 %}
+            stderr:
+              {{ g.stderr | trim | replace('\n', '\n    ') }}
+          {% endif %}
+          {% if g.status | int == 0 %}
+            HTTP 0 with no body means curl produced no output at all — `-w`
+            always emits a code when curl runs. So curl did not run, or was
+            killed. The exit code and stderr above say which; a shell quoting
+            error (exit 2, "unexpected EOF while looking for matching quote")
+            means the payload broke the command line, which is why the payload
+            is written to a file and passed as -d @file rather than inlined.
+          {% endif %}
           {% endfor %}
           The volumes have NOT been deleted — decommission stopped here so the
           groups and the volumes stay consistent. Re-run after resolving the

@@ -473,6 +473,27 @@ image). Everything else has a sensible default.
 | `di_k8s_status_delay` | `5` | Delay between status-label retries. |
 | `di_k8s_auto_install_collection` | `true` | Auto-install `kubernetes.core` via `ansible-galaxy` on the controller. Set `false` to manage it manually. |
 
+## Tier 0 Decommission (decommission_tier0.yml)
+
+Removes nodes and volumes from Hammerspace. Touches no data on any host and
+never connects to the storage nodes — every task is delegated to the
+controller and talks only to the API.
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `decommission_confirm` | `false` | Safety gate — must be passed as `-e decommission_confirm=true` to proceed. Without it the play prints the plan and stops. |
+| `decommission_explicit_volume_group_leave` | `false` | Remove volumes from their volume groups with an explicit PUT *before* deleting them. Not needed: deleting a volume removes it from its groups, and the playbook verifies that after the delete. Set to `true` only if the post-delete verification warns that references survived. |
+
+Deleting a storage volume removes it from every volume group that holds it, so
+the playbook lets the delete cascade and then re-reads the groups to confirm.
+If any group kept a reference it warns — loudly, but without failing, since the
+volumes and nodes are already gone by that point — and names the flag above.
+
+The explicit PUT path is kept because it is the only option for a cluster whose
+API does not cascade. It is not the default because a PUT replaces the whole
+group object, so it has to round-trip every field the API set, including the
+placement objectives.
+
 ## Tier 0 Host Reset (reset-tier0-host.yml)
 
 | Variable | Default | Description |

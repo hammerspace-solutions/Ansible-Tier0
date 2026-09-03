@@ -212,6 +212,29 @@
                   {{ (_vg_json.expressions | default([])) | first
                      | default({'_type': 'EXPRESSION'}, true) }}
 
+            # The payload goes in a FILE, not on the command line. It is the
+            # whole volume group object round-tripped (so a PUT, which
+            # REPLACES the resource, cannot drop placement objectives), and
+            # that object embeds the expanded volumes, their nodes and logical
+            # volumes. Inlining tens of kilobytes of arbitrary API-controlled
+            # text inside shell single quotes means one apostrophe anywhere in
+            # it ends the quoting and curl never runs — which shows up as
+            # "HTTP 0 / (empty response body)", because -w always emits a code
+            # when curl actually runs.
+            - name: Write the volume group payload to a file
+              ansible.builtin.tempfile:
+                state: file
+                suffix: .json
+              register: _vg_payload_file
+              when: not ansible_check_mode
+
+            - name: Populate the payload file
+              ansible.builtin.copy:
+                content: "{{ _vg_payload | to_json }}"
+                dest: "{{ _vg_payload_file.path }}"
+                mode: "0600"
+              when: not ansible_check_mode
+
             - name: "Update volume group {{ hammerspace_volume_group }}"
               ansible.builtin.shell:
                 cmd: >-
@@ -219,7 +242,7 @@
                   {{ '' if (hammerspace_api_validate_certs | default(false)) else '-k' }}
                   -H "Authorization: Basic {{ (hammerspace_api_user ~ ':' ~ hammerspace_api_password) | b64encode }}"
                   -X PUT -H "Content-Type: application/json"
-                  -d '{{ _vg_payload | to_json }}'
+                  -d @{{ _vg_payload_file.path | quote }}
                   "{{ hs_api_url }}/volume-groups/{{ _vg_uuid | urlencode }}"
               register: _vg_put_raw
               changed_when: true
@@ -227,11 +250,21 @@
               no_log: true
               when: not ansible_check_mode
 
+            # Before the rejection check below, which is a hard failure.
+            - name: Remove the payload file
+              ansible.builtin.file:
+                path: "{{ _vg_payload_file.path }}"
+                state: absent
+              when:
+                - not ansible_check_mode
+                - _vg_payload_file.path is defined
+
             - name: Fail if the volume group update was rejected
               ansible.builtin.fail:
                 msg: |
                   Updating volume group '{{ hammerspace_volume_group }}' failed
-                  with HTTP {{ (_vg_put_raw.stdout_lines | default(['0']))[-1] | default('0') }}.
+                  with HTTP {{ (_vg_put_raw.stdout_lines | default(['0']))[-1] | default('0') }}
+                  (curl exit {{ _vg_put_raw.rc | default('?') }}).
 
                   PUT {{ hs_api_url }}/volume-groups/{{ _vg_uuid }}
 
@@ -245,6 +278,13 @@
                   password), so the body above is the only record of what the
                   API objected to — it is reproduced here deliberately. The
                   response cannot contain the credential.
+                  {% if ((_vg_put_raw.stdout_lines | default(['0']))[-1] | default('0') | int) == 0 %}
+
+                  HTTP 0 with no body means curl produced no output at all —
+                  `-w` always emits a code when curl runs. So curl did not run,
+                  or was killed. stderr:
+                    {{ (_vg_put_raw.stderr | default('') | regex_replace('Basic [A-Za-z0-9+/=]+', 'Basic <redacted>')) | trim | default('(none)', true) }}
+                  {% endif %}
               when:
                 - not ansible_check_mode
                 - ((_vg_put_raw.stdout_lines | default(['0']))[-1] | default('0') | int) not in [200, 201, 202]
