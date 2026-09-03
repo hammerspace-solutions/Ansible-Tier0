@@ -57,9 +57,85 @@
     decommission_confirm: false
 
   pre_tasks:
+    # ------------------------------------------------------------------ #
+    # Resolve the repo root BEFORE anything uses it.
+    #
+    # vars/main.yml defines `repo_root`, but that same file is where each site
+    # sets its own hammerspace_api_host — so operators keep a locally modified
+    # copy and `git pull` does not update it. A fix shipped in vars/main.yml
+    # therefore does not reach a running scheduler: the 2026-09-03 bug
+    # (`repo_root: "{{ playbook_dir }}/.."`, one level too high for a
+    # top-level playbook) kept producing
+    #
+    #   python3: can't open file '.../Ansible-Tier0/../cleanup_instance_nodes.py'
+    #
+    # on the next run, after it had been fixed upstream.
+    #
+    # So the path is probed rather than trusted, and a stale definition is
+    # reported up front instead of failing 28 tasks and four changes later.
+    # ------------------------------------------------------------------ #
+    - name: Locate cleanup_instance_nodes.py
+      ansible.builtin.stat:
+        path: "{{ item }}/cleanup_instance_nodes.py"
+      register: _dc_script_probe
+      loop:
+        - "{{ repo_root }}"
+        - "{{ playbook_dir }}"
+      loop_control:
+        label: "{{ item }}"
+      delegate_to: localhost
+      run_once: true
+      check_mode: false
+
+    - name: Resolve the repository root for this run
+      ansible.builtin.set_fact:
+        _dc_repo_root: >-
+          {{ (_dc_script_probe.results | selectattr('stat.exists')
+              | map(attribute='item') | list | first) | default('', true) }}
+      delegate_to: localhost
+      run_once: true
+
+    - name: Fail if the repository layout could not be resolved
+      ansible.builtin.fail:
+        msg: |
+          cleanup_instance_nodes.py was not found under either candidate root:
+
+            repo_root:    {{ repo_root }}
+            playbook_dir: {{ playbook_dir }}
+
+          This playbook must run from a complete checkout of Ansible-Tier0.
+          If the file really is missing, re-clone or
+          `git checkout cleanup_instance_nodes.py`.
+      when: _dc_repo_root | length == 0
+      delegate_to: localhost
+      run_once: true
+
+    - name: Warn that vars/main.yml has a stale repo_root
+      ansible.builtin.debug:
+        msg: |
+          NOTE: vars/main.yml resolves repo_root to
+            {{ repo_root }}
+          but the repository is actually at
+            {{ _dc_repo_root }}
+
+          This run works around it. Every OTHER top-level playbook
+          (preflight_check.yml, reset-tier0-host.yml) still gets the wrong
+          path — and they use it to load vars/vault.yml with
+          `failed_when: false`, so the vault silently loads NOTHING and the
+          API password comes from wherever else it can.
+
+          Fix the local vars/main.yml line to the shipped definition:
+
+            repo_root: "<< (playbook_dir | dirname) if (playbook_dir | basename) == 'plays' else playbook_dir >>"
+
+          (with << >> written as Jinja braces).
+      when: _dc_repo_root != repo_root
+      delegate_to: localhost
+      run_once: true
+
     - name: Load vault variables (if available)
       ansible.builtin.include_vars:
-        file: "{{ repo_root }}/vars/vault.yml"
+        file: "{{ _dc_repo_root }}/vars/vault.yml"
       failed_when: false
       no_log: true
       delegate_to: localhost
@@ -208,7 +284,7 @@
           decommissioned, or the inventory selection does not correspond to what
           is registered. List what the cluster actually has:
 
-            python3 {{ repo_root }}/cleanup_instance_nodes.py \
+            python3 {{ _dc_repo_root }}/cleanup_instance_nodes.py \
               --host {{ hammerspace_api_host }} --user {{ hammerspace_api_user }} \
               --password '<password>' --list-nodes
       when: _dc_unmatched | length > 0
@@ -360,7 +436,7 @@
       # appears in the controller's process list.
       ansible.builtin.command:
         argv: >-
-          {{ ['python3', repo_root ~ '/cleanup_instance_nodes.py',
+          {{ ['python3', _dc_repo_root ~ '/cleanup_instance_nodes.py',
               '--host', hammerspace_api_host,
               '--port', (hammerspace_api_port | default(8443)) | string,
               '--user', hammerspace_api_user,

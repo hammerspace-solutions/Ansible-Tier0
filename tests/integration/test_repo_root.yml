@@ -116,6 +116,106 @@
             _test_failures: "{{ _test_failures + ['TEST 2: ' ~ (ansible_failed_result.msg | default('unknown'))] }}"
 
     # ========================================================================
+    # TEST 5: a shipped repo_root fix does not reach a running scheduler.
+    #
+    # vars/main.yml is BOTH shipped logic and site config — it is where each
+    # site sets hammerspace_api_host — so operators keep a locally modified
+    # copy and `git pull` does not update it. After the conditional repo_root
+    # was fixed upstream, the very next run still failed with
+    #
+    #   python3: can't open file '.../Ansible-Tier0/../cleanup_instance_nodes.py'
+    #
+    # because the scheduler's vars/main.yml still had the old line.
+    #
+    # decommission_tier0.yml therefore PROBES for the script rather than
+    # trusting repo_root, and reports a stale definition instead of failing 28
+    # tasks later with four changes already made.
+    # ========================================================================
+    - name: 'TEST 5: decommission probes for the repo root rather than trusting it'
+      block:
+        - name: Read decommission_tier0.yml
+          ansible.builtin.slurp:
+            src: "{{ playbook_dir }}/../../decommission_tier0.yml"
+          register: _dc5
+
+        - name: Decode
+          ansible.builtin.set_fact:
+            _dc5_raw: "{{ _dc5.content | b64decode }}"
+
+        # These needles contain Jinja braces, so they are built under
+        # {% raw %} — otherwise Ansible templates them before the assert runs
+        # and compares against the CURRENT repo_root instead of the literal.
+        - name: Build the literals to search for
+          ansible.builtin.set_fact:
+            _re_bad_script: '{% raw %}\{\{ repo_root \}\}/cleanup_instance_nodes\.py{% endraw %}'
+            _re_bad_argv: '{% raw %}(?<!_dc_)repo_root ~ ''/cleanup_instance_nodes\.py''{% endraw %}'
+            _needle_good_vault: '{% raw %}{{ _dc_repo_root }}/vars/vault.yml{% endraw %}'
+
+        - name: 'TEST 5 ASSERT: the script path is probed and never taken on trust'
+          ansible.builtin.assert:
+            that:
+              - "'Locate cleanup_instance_nodes.py' in _dc5_raw"
+              - "'_dc_repo_root' in _dc5_raw"
+              # Every actual invocation must go through the probed value.
+              # Negative lookbehind: `repo_root ~ '/cleanup...` is a
+              # SUBSTRING of the correct `_dc_repo_root ~ '/cleanup...`, so a
+              # plain `not in` reports a false regression on the fixed file.
+              - _dc5_raw is not search(_re_bad_argv)
+              - _dc5_raw is not search(_re_bad_script)
+            fail_msg: |
+              REGRESSION: decommission_tier0.yml invokes
+              cleanup_instance_nodes.py through repo_root directly. A
+              scheduler with a locally modified vars/main.yml then keeps
+              failing after the fix has shipped.
+
+        - name: 'TEST 5 ASSERT: the vault load also uses the probed root'
+          ansible.builtin.assert:
+            that:
+              - _needle_good_vault in _dc5_raw
+            fail_msg: |
+              The vault include still uses repo_root. It carries
+              `failed_when: false`, so a wrong path silently loads NOTHING —
+              which is exactly why the stale definition went unnoticed for
+              months.
+
+        - name: 'TEST 5 ASSERT: a stale repo_root is reported, not silently patched'
+          ansible.builtin.assert:
+            that:
+              - "'stale repo_root' in _dc5_raw"
+              - "'_dc_repo_root != repo_root' in _dc5_raw"
+            fail_msg: |
+              Working around a stale repo_root without saying so hides the
+              problem from every OTHER top-level playbook, which still get the
+              wrong path. The workaround must warn.
+
+        - name: Simulate the probe against a stale repo_root
+          ansible.builtin.stat:
+            path: "{{ item }}/cleanup_instance_nodes.py"
+          register: _probe5
+          loop:
+            - "{{ playbook_dir }}/../.."          # stale: one level too high
+            - "{{ playbook_dir }}/../.."          # (repo root is ../..)
+          check_mode: false
+
+        - name: 'TEST 5 ASSERT: the probe finds the script at the real root'
+          ansible.builtin.assert:
+            that:
+              - _found | length > 0
+            fail_msg: |
+              The probe found no cleanup_instance_nodes.py under the repo
+              root, so this audit cannot be verifying anything.
+          vars:
+            _found: >-
+              {{ _probe5.results | selectattr('stat.exists')
+                 | map(attribute='item') | list }}
+
+        - ansible.builtin.set_fact:
+            _test_passes: "{{ _test_passes + ['TEST 5: decommission probes for the repo root and warns when vars/main.yml is stale'] }}"
+      rescue:
+        - ansible.builtin.set_fact:
+            _test_failures: "{{ _test_failures + ['TEST 5: ' ~ (ansible_failed_result.msg | default('unknown') | replace('\n', ' '))] }}"
+
+    # ========================================================================
     # TEST 3: audit — no playbook_dir refs sneak into role tasks or plays
     # (caught the 2026-05-18 Containerfile bug)
     # ========================================================================
