@@ -36,7 +36,7 @@ import sys
 import time
 import urllib.parse
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 
 # Disable SSL warnings for self-signed certificates
 requests.packages.urllib3.disable_warnings(requests.packages.urllib3.exceptions.InsecureRequestWarning)
@@ -124,7 +124,7 @@ class HammerspaceClient:
             print(f"  Failed to delete node '{node_name}': {response.status_code} - {response.text}")
             return False
 
-    def get_storage_volume(self, volume_name: str) -> Dict[str, Any] | None:
+    def get_storage_volume(self, volume_name: str) -> Optional[Dict[str, Any]]:
         """Get a single storage volume by name. Returns None if not found."""
         encoded_name = urllib.parse.quote(volume_name, safe='')
         response = self._request("GET", f"storage-volumes/{encoded_name}")

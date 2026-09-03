@@ -58,7 +58,8 @@ if command -v shellcheck >/dev/null 2>&1; then
         shellcheck scripts/run.sh \
                    roles/nvme_discovery/files/scan_disks.sh \
                    tests/integration/test_run_sh_locale.sh \
-                   tests/integration/test_scan_disks.sh
+                   tests/integration/test_scan_disks.sh \
+                   tests/integration/test_python_compat.sh
 else
     echo "skipping shellcheck (not installed)"
 fi
@@ -125,6 +126,16 @@ step "Locale fallback unit tests (run.sh)" \
 # section inside it self-skips on non-Linux.
 step "Protected-disk resolver unit tests (scan_disks.sh)" \
     bash tests/integration/test_scan_disks.sh
+
+# -- I: Python version compatibility -----------------------------------------
+# The standalone *.py scripts run under whatever `python3` the SCHEDULER has,
+# which is routinely older than the workstation they were written on. Audits
+# for 3.10+ constructs in runtime-evaluated positions and smoke-runs each
+# script's module body via --help. Added after a PEP 604 annotation
+# (`Dict[str, Any] | None`) crashed cleanup_instance_nodes.py on the field
+# scheduler while parsing fine everywhere else.
+step "Python version compatibility (*.py)" \
+    bash tests/integration/test_python_compat.sh
 
 # -- Summary ------------------------------------------------------------------
 printf '\n=============================================\n'
