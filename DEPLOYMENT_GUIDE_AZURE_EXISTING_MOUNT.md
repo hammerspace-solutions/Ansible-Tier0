@@ -93,6 +93,44 @@ no vault access.
 > committed. Encrypt it with `ansible-vault encrypt vars/vault.yml`, or use the
 > Key Vault path above and leave the file as the shipped template.
 
+#### When the Key Vault lookup fails
+
+The lookup carries `no_log: true`, because its result holds the plaintext admin
+password and `scripts/run.sh` writes every run to a log file. The playbook
+therefore never lets that task fail the play — it reports the Azure error in a
+following task instead. If you see only this:
+
+```
+fatal: [10.0.0.5 -> localhost]: FAILED! =>
+  censored: 'the output has been hidden due to the fact that
+  ''no_log: true'' was specified for this result'
+```
+
+…you are on a build from before 2026-09-03. Pull the current
+`roles/hammerspace_integration/tasks/keyvault_password.yml` and re-run; the
+real error is printed.
+
+Fastest way to split authentication from authorization — run it on the
+**scheduler**, which is where the lookup executes:
+
+```bash
+az keyvault secret show --vault-name <vault> --name hammerspace-admin-password --query value -o tsv
+```
+
+| Symptom | Cause |
+|---|---|
+| `AADSTS` / no token / `DefaultAzureCredential failed` | `hammerspace_keyvault_auth_source` is wrong — use `msi` on a CycleCloud scheduler, `cli` under `az login` |
+| `(Forbidden)` / 403 | auth worked; the identity lacks **Key Vault Secrets User** on the vault |
+| `SecretNotFound` / empty result | wrong secret name (case-sensitive) |
+| connection timeout | vault is behind a private endpoint the scheduler cannot reach |
+
+Confirm an identity is actually attached to the scheduler:
+
+```bash
+curl -sS -H Metadata:true --max-time 5 \
+  'http://169.254.169.254/metadata/identity/oauth2/token?api-version=2018-02-01&resource=https://vault.azure.net'
+```
+
 ---
 
 ## 02 — Choose the nodes
