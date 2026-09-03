@@ -233,6 +233,24 @@ Order is deliberate: **leave the volume groups → delete the volumes → delete
 node**, so no group is left holding a reference to storage that no longer
 exists.
 
+### Targeting is identical to deployment
+
+`decommission_tier0.yml` takes the same `--limit` as `site.yml` — the same
+wildcard, or IPs if the inventory is IP-named per step 02.
+
+Targets are then resolved against Hammerspace by **registered node name OR
+registered management IP** (nodes are registered with `mgmtIpAddress`), and
+everything downstream uses the name Hammerspace actually knows.
+
+That second path matters on CycleCloud: VMSS instance names change on every
+scale-set recreation, so a node deployed as `hb120v3-abc_0` may present a
+different inventory name later. Matching on the IP as well means decommission
+still finds it.
+
+If a selected host matches **neither** name nor IP, the run **stops** and lists
+what it searched for. It does not quietly delete nothing — `--limit` narrowing
+to zero registered nodes would otherwise look like success.
+
 ### What survives
 
 The playbook never connects to the storage nodes at all — every task is

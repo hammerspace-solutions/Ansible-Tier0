@@ -82,18 +82,131 @@
       run_once: true
 
   tasks:
-    - name: Resolve the API base URL and target node names
+    # Each host contributes BOTH identifiers. The node is matched in
+    # Hammerspace by either, which is what makes `--limit <ip>` work exactly
+    # like it does for deployment.
+    #
+    # This also closes a real gap: the inventory naming scheme can differ
+    # between the deploy run and the decommission run (VMSS instance names
+    # change on every scale-set recreation, and `hostnames:` may be switched to
+    # IPs later). Matching on the registered mgmtIpAddress as well as the name
+    # means decommission still finds the node instead of silently removing
+    # nothing.
+    - name: Resolve the API base URL and this host's identifiers
       ansible.builtin.set_fact:
         hs_api_url: "https://{{ hammerspace_api_host }}:{{ hammerspace_api_port | default(8443) }}/mgmt/v1.2/rest"
         _dc_node_name: "{{ hammerspace_node_name | default(inventory_hostname) }}"
+        # ansible_host is an inventory var, so it is available without facts.
+        # The azure_rm inventory sets it to the private IP.
+        _dc_node_ip: "{{ hammerspace_node_ip | default(ansible_host | default(inventory_hostname)) }}"
       delegate_to: localhost
 
-    - name: Collect the node names being decommissioned
+    - name: Collect the identifiers being decommissioned
+      ansible.builtin.set_fact:
+        _dc_want_names: >-
+          {{ ansible_play_hosts | map('extract', hostvars, '_dc_node_name')
+             | select('defined') | list | unique | sort }}
+        _dc_want_ips: >-
+          {{ ansible_play_hosts | map('extract', hostvars, '_dc_node_ip')
+             | select('defined') | list | unique | sort }}
+      delegate_to: localhost
+      run_once: true
+
+    - name: List the registered Hammerspace nodes
+      ansible.builtin.shell:
+        cmd: >-
+          curl -s --max-time {{ hammerspace_api_curl_timeout | default(60) }}
+          {{ '' if (hammerspace_api_validate_certs | default(false)) else '-k' }}
+          -H "Authorization: Basic {{ (hammerspace_api_user ~ ':' ~ hammerspace_api_password) | b64encode }}"
+          "{{ hs_api_url }}/nodes"
+      register: _dc_nodes_raw
+      changed_when: false
+      failed_when: false
+      check_mode: false
+      no_log: true
+      delegate_to: localhost
+      run_once: true
+
+    - name: Fail if the node list could not be read
+      ansible.builtin.fail:
+        msg: |
+          Could not list nodes from {{ hs_api_url }}.
+          Nothing has been changed. Check API reachability and credentials.
+      when: (_dc_nodes_raw.stdout | default('') | trim) | length == 0
+      delegate_to: localhost
+      run_once: true
+
+    - name: Index the registered nodes by name and by management IP
+      ansible.builtin.set_fact:
+        _dc_reg_names: >-
+          {{ (_dc_nodes_raw.stdout | from_json)
+             | selectattr('name', 'defined') | map(attribute='name') | list }}
+        _dc_reg_ips: >-
+          {{ (_dc_nodes_raw.stdout | from_json)
+             | selectattr('mgmtIpAddress.address', 'defined')
+             | map(attribute='mgmtIpAddress.address') | list }}
+      delegate_to: localhost
+      run_once: true
+
+    # Per-host, so the comparison uses THIS host's identifiers rather than a
+    # cross-host expression that silently mismatches when hammerspace_node_name
+    # differs from inventory_hostname.
+    - name: Decide whether this host is registered
+      ansible.builtin.set_fact:
+        # | bool so the comparison below is a real boolean — under a folded
+        # scalar the string "False" would otherwise be truthy.
+        _dc_matched: >-
+          {{ ((_dc_node_name in _dc_reg_names) or (_dc_node_ip in _dc_reg_ips)) | bool }}
+        _dc_resolved: >-
+          {{ ((_dc_nodes_raw.stdout | from_json)
+              | selectattr('name', 'defined')
+              | selectattr('name', 'equalto', _dc_node_name)
+              | map(attribute='name') | list)
+             + ((_dc_nodes_raw.stdout | from_json)
+                | selectattr('name', 'defined')
+                | selectattr('mgmtIpAddress.address', 'defined')
+                | selectattr('mgmtIpAddress.address', 'equalto', _dc_node_ip)
+                | map(attribute='name') | list) }}
+      delegate_to: localhost
+
+    # The names Hammerspace actually knows — never the inventory's idea of
+    # them. Everything downstream uses these.
+    - name: Collect the resolved node names
       ansible.builtin.set_fact:
         _dc_nodes: >-
-          {{ ansible_play_hosts
-             | map('extract', hostvars, '_dc_node_name')
-             | select('defined') | list | unique | sort }}
+          {{ ansible_play_hosts | map('extract', hostvars, '_dc_resolved')
+             | select('defined') | map('list') | sum(start=[]) | unique | sort }}
+        # `extract` is a FILTER, not a test — select('extract', ...) raises
+        # "No test named 'extract'". Go through hostvars and selectattr.
+        _dc_unmatched: >-
+          {{ ansible_play_hosts | map('extract', hostvars)
+             | selectattr('_dc_matched', 'defined')
+             | selectattr('_dc_matched', 'equalto', false)
+             | map(attribute='inventory_hostname') | list }}
+      delegate_to: localhost
+      run_once: true
+
+    - name: Fail if any selected host is not registered in Hammerspace
+      ansible.builtin.fail:
+        msg: |
+          {{ _dc_unmatched | length }} of the selected host(s) matched no
+          registered Hammerspace node, by name or by management IP:
+
+          {% for h in _dc_unmatched %}    - {{ h }}
+          {% endfor %}
+
+          Searched names : {{ _dc_want_names | join(', ') }}
+          Searched IPs   : {{ _dc_want_ips | join(', ') }}
+          Matched nodes  : {{ _dc_nodes | join(', ') | default('(none)', true) }}
+
+          Nothing has been changed. Either those nodes are already
+          decommissioned, or the inventory selection does not correspond to what
+          is registered. List what the cluster actually has:
+
+            python3 {{ repo_root }}/cleanup_instance_nodes.py \
+              --host {{ hammerspace_api_host }} --user {{ hammerspace_api_user }} \
+              --password '<password>' --list-nodes
+      when: _dc_unmatched | length > 0
       delegate_to: localhost
       run_once: true
 

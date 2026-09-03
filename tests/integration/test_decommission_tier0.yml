@@ -224,6 +224,84 @@
             _test_failures: "{{ _test_failures + ['TEST 4: ' ~ (ansible_failed_result.msg | default('unknown') | replace('\n', ' '))] }}"
 
     # ========================================================================
+    # TEST 5: nodes resolve by registered NAME or registered management IP, so
+    # `--limit <ip>` works exactly as it does for deployment.
+    # ========================================================================
+    # Nodes are registered with mgmtIpAddress (hammerspace_integration/main.yml),
+    # so the IP is a stable second identifier. This matters beyond convenience:
+    # the inventory naming scheme can differ between the deploy run and the
+    # decommission run — VMSS instance names change on every scale-set
+    # recreation, and `hostnames:` may be switched to IPs later. Matching on
+    # both means decommission still finds the node instead of silently removing
+    # nothing.
+    - name: 'TEST 5: name-or-IP resolution against registered nodes'
+      block:
+        - name: A cluster where nodes were registered under VMSS names
+          ansible.builtin.set_fact:
+            _reg:
+              - {name: "hb120v3-abc_0", mgmtIpAddress: {address: "10.0.16.5"}}
+              - {name: "hb120v3-abc_1", mgmtIpAddress: {address: "10.0.16.7"}}
+              - {name: "unrelated", mgmtIpAddress: {address: "10.0.99.9"}}
+
+        - name: Resolve a name-based and an IP-based selection
+          ansible.builtin.set_fact:
+            _by_name: >-
+              {{ (_reg | selectattr('name', 'equalto', 'hb120v3-abc_0') | map(attribute='name') | list)
+                 + (_reg | selectattr('mgmtIpAddress.address', 'equalto', 'nope') | map(attribute='name') | list) }}
+            _by_ip: >-
+              {{ (_reg | selectattr('name', 'equalto', '10.0.16.7') | map(attribute='name') | list)
+                 + (_reg | selectattr('mgmtIpAddress.address', 'equalto', '10.0.16.7') | map(attribute='name') | list) }}
+            _ghost: >-
+              {{ (_reg | selectattr('name', 'equalto', 'ghost') | map(attribute='name') | list)
+                 + (_reg | selectattr('mgmtIpAddress.address', 'equalto', '10.0.55.55') | map(attribute='name') | list) }}
+
+        - name: 'TEST 5 ASSERT: both paths resolve to the REGISTERED name'
+          ansible.builtin.assert:
+            that:
+              - _by_name == ['hb120v3-abc_0']
+              # Targeted by IP, resolves to the name Hammerspace knows — not
+              # the IP. Everything downstream must use the registered name.
+              - _by_ip == ['hb120v3-abc_1']
+              - _ghost == []
+              - "'unrelated' not in (_by_name + _by_ip + _ghost)"
+            fail_msg: |
+              REGRESSION: node resolution no longer matches by both name and
+              management IP, or leaked an unrelated node.
+              by_name={{ _by_name }} by_ip={{ _by_ip }} ghost={{ _ghost }}
+
+        - name: 'TEST 5 ASSERT: the playbook implements both match paths'
+          ansible.builtin.assert:
+            that:
+              - "'_dc_node_name in _dc_reg_names' in _dc_code"
+              - "'_dc_node_ip in _dc_reg_ips' in _dc_code"
+              - "'mgmtIpAddress.address' in _dc_code"
+              # An unresolvable selection must abort, not quietly delete
+              # nothing — cleanup_instance_nodes.py matches NOTHING when given
+              # no filter, so a silent empty selection looks like success.
+              - "'_dc_unmatched | length > 0' in _dc_code"
+            fail_msg: |
+              REGRESSION: decommission_tier0.yml must resolve targets by
+              registered name OR registered mgmtIpAddress, and must hard-fail
+              when a selected host matches neither.
+
+        - name: 'TEST 5 ASSERT: no select(extract) — it is a filter, not a test'
+          ansible.builtin.assert:
+            that:
+              - "\"select('extract'\" not in _dc_code"
+            fail_msg: |
+              REGRESSION: select('extract', ...) raises "No test named
+              'extract'" at runtime. Use map('extract', hostvars) followed by
+              selectattr instead.
+
+        - name: Record TEST 5 pass
+          ansible.builtin.set_fact:
+            _test_passes: "{{ _test_passes + ['TEST 5: targets resolve by registered name or mgmtIpAddress; unresolvable selection is fatal'] }}"
+      rescue:
+        - name: Record TEST 5 failure
+          ansible.builtin.set_fact:
+            _test_failures: "{{ _test_failures + ['TEST 5: ' ~ (ansible_failed_result.msg | default('unknown') | replace('\n', ' '))] }}"
+
+    # ========================================================================
     # Report
     # ========================================================================
     - name: Print test report
