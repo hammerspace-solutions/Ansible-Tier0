@@ -53,14 +53,38 @@
         msg: "Volume '{{ volume_group_update.volume_name }}' already in volume group '{{ volume_group_update.group_name }}'"
       when: _volume_already_in_group
 
+    # PUT targets the UUID, as every other write in this role does. A GET by
+    # name works, which is why the read half looked correct while the write
+    # returned HTTP 400.
+    - name: "Resolve the volume group UUID"
+      ansible.builtin.set_fact:
+        _vg_add_uuid: "{{ vg_existing_check.json.uoid.uuid | default('') }}"
+
+    - name: "Fail if the volume group has no UUID"
+      ansible.builtin.fail:
+        msg: |
+          Volume group '{{ volume_group_update.group_name }}' was returned
+          without a uoid.uuid, so there is no identifier to PUT to.
+
+          Response keys: {{ vg_existing_check.json.keys() | list }}
+      when:
+        - not _volume_already_in_group
+        - _vg_add_uuid | length == 0
+
+    # The payload is the fetched object with only the locations replaced. A PUT
+    # replaces the resource, so a hand-built three-key body drops uoid,
+    # internalId and any placement objectives the group carries.
     - name: "Build volume group update payload"
       ansible.builtin.set_fact:
-        _vg_update_payload:
-          _type: "VOLUME_GROUP"
-          name: "{{ volume_group_update.group_name }}"
-          expressions:
-            - operator: "IN"
-              locations: "{{ _vg_existing_locations + [_vg_new_volume_location] }}"
+        _vg_update_payload: >-
+          {{ vg_existing_check.json | combine({'expressions':
+               [ _vg_add_expr0 | combine({'operator': 'IN',
+                   'locations': _vg_existing_locations + [_vg_new_volume_location]}) ]
+             }) }}
+      vars:
+        _vg_add_expr0: >-
+          {{ (vg_existing_check.json.expressions | default([])) | first
+             | default({'_type': 'EXPRESSION'}, true) }}
       when: not _volume_already_in_group
 
     - name: "Update volume group {{ volume_group_update.group_name }} with new volume"
@@ -71,12 +95,35 @@
           -H "Authorization: Basic {{ (hammerspace_api_user ~ ':' ~ hammerspace_api_password) | b64encode }}"
           -X PUT -H "Content-Type: application/json"
           -d '{{ _vg_update_payload | to_json }}'
-          "{{ hs_api_url }}/volume-groups/{{ volume_group_update.group_name | urlencode }}"
+          "{{ hs_api_url }}/volume-groups/{{ _vg_add_uuid | urlencode }}"
       register: vg_update_result
       changed_when: true
+      failed_when: false
+      no_log: true
       when:
         - not _volume_already_in_group
         - not ansible_check_mode
+
+    # The result used to go unchecked: the status line was never read, so a
+    # rejected PUT still reported "added to volume group" below and the volume
+    # was quietly left out of the group.
+    - name: "Fail if the volume group update was rejected"
+      ansible.builtin.fail:
+        msg: |
+          Adding volume '{{ volume_group_update.volume_name }}' to volume group
+          '{{ volume_group_update.group_name }}' failed with HTTP
+          {{ (vg_update_result.stdout_lines | default(['0']))[-1] | default('0') }}.
+
+          PUT {{ hs_api_url }}/volume-groups/{{ _vg_add_uuid }}
+
+          The API said:
+            {{ (vg_update_result.stdout_lines | default([]))[:-1] | join('\n  ') | trim | default('(empty response body)', true) }}
+
+          The volume itself is registered; only its group membership failed.
+      when:
+        - not _volume_already_in_group
+        - not ansible_check_mode
+        - ((vg_update_result.stdout_lines | default(['0']))[-1] | default('0') | int) not in [200, 201, 202]
 
     - name: "Display volume group update status"
       ansible.builtin.debug:

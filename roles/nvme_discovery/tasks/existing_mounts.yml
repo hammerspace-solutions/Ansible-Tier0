@@ -126,7 +126,17 @@
       loop: "{{ _em_findmnt.results }}"
       loop_control:
         label: "{{ item.item.path }}"
-      when: item.rc != 0
+      # `| default(1)`, NOT `is defined`. This is a safety gate: it refuses to
+      # export a path that is not a mountpoint. The probe above carries
+      # `check_mode: false`, so `rc` is always present today — but if that ever
+      # stops being true, a missing `rc` must read as "not verified" and FAIL,
+      # never as "fine". Fails closed.
+      #
+      # The writability gate further down deliberately does the opposite: its
+      # probe is skipped under --check on purpose, so a missing `rc` there means
+      # "not run", and it fails open. Same shape, opposite default — the
+      # difference is whether the probe was skipped BY DESIGN.
+      when: item.rc | default(1) != 0
 
     - name: Identify disks that back critical system mounts
       ansible.builtin.script:
@@ -203,8 +213,28 @@
       loop_control:
         label: "{{ item.path }}"
 
-    # `| default([])`: when the probe above is skipped under --check the
-    # registered var has no `results` key at all, so the loop must tolerate it.
+    # Two different skip shapes have to be tolerated here, and only one of
+    # them is what the `| default([])` below handles.
+    #
+    # `| default([])` covers the probe never running at all (e.g. an empty
+    # _existing_mounts), where `_em_writable` has no `results` key.
+    #
+    # It does NOT cover the --check case, which is what actually broke. A
+    # LOOPED task whose `when` is false still registers a `results` list — one
+    # entry per item, each of the form
+    #
+    #   {"skipped": true, "skip_reason": "Conditional result was False",
+    #    "item": {...}, "changed": false}
+    #
+    # so `results` IS present, `| default([])` never fires, the loop runs over
+    # those skip dicts, and `item.rc` raises
+    #
+    #   The conditional check 'item.rc != 0' failed. The error was: error
+    #   while evaluating conditional (item.rc != 0): 'dict object' has no
+    #   attribute 'rc'
+    #
+    # This is the loop-shaped form of the 2026-07-21 registered-var rule: the
+    # per-ITEM attribute has to be guarded, not just the registered var.
     - name: Fail if an export directory is not writable
       ansible.builtin.fail:
         msg: |
@@ -221,7 +251,11 @@
       loop: "{{ _em_writable.results | default([]) }}"
       loop_control:
         label: "{{ item.item.path }}"
-      when: item.rc != 0
+      # `is defined` first: under --check every item is a skip dict with no
+      # `rc`, and Jinja evaluates both sides of `and` lazily in order.
+      when:
+        - item.rc is defined
+        - item.rc != 0
 
     # ------------------------------------------------------------------ #
     # Build the same facts discovery would have produced

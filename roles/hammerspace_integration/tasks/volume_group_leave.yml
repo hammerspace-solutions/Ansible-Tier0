@@ -48,6 +48,8 @@
         _vgl_plan: >-
           {{ (_vgl_plan | default([])) + [{
                'name': item.name,
+               'uuid': item.uoid.uuid | default(''),
+               'obj': item,
                'keep': (item.expressions[0].locations | default([]))
                        | rejectattr('storageVolume.name', 'in', _vgl_volumes) | list,
                'remove': (item.expressions[0].locations | default([]))
@@ -68,6 +70,26 @@
           None of the {{ _vgl_volumes | length }} volume(s) being decommissioned
           are members of any volume group — nothing to remove.
       when: _vgl_changes | length == 0
+
+    # Not a silent skip. If a group cannot be addressed, its volumes stay in
+    # the group and are then deleted underneath it — the dangling-reference
+    # state this whole file exists to prevent. Stop instead.
+    - name: Fail if an affected volume group has no UUID
+      ansible.builtin.fail:
+        msg: |
+          Volume group '{{ item.name }}' holds volumes being decommissioned but
+          the API returned it without a uoid.uuid, so it cannot be updated
+          (every write in this role PUTs to /volume-groups/<uuid>).
+
+          Nothing has been changed and no volume has been deleted.
+
+          Inspect it:
+            curl -sk -u '{{ hammerspace_api_user }}:<password>' \
+              '{{ hs_api_url }}/volume-groups' | jq '.[] | select(.name=="{{ item.name }}")'
+      loop: "{{ _vgl_changes | default([]) }}"
+      loop_control:
+        label: "{{ item.name }}"
+      when: (item.uuid | default('')) | length == 0
 
     - name: Show exactly what will change
       ansible.builtin.debug:
@@ -93,9 +115,11 @@
           {{ '' if (hammerspace_api_validate_certs | default(false)) else '-k' }}
           -H "Authorization: Basic {{ (hammerspace_api_user ~ ':' ~ hammerspace_api_password) | b64encode }}"
           -X PUT -H "Content-Type: application/json"
-          -d '{{ {'_type': 'VOLUME_GROUP', 'name': item.name,
-                  'expressions': [{'operator': 'IN', 'locations': item.keep}]} | to_json }}'
-          "{{ hs_api_url }}/volume-groups/{{ item.name | urlencode }}"
+          -d '{{ item.obj | combine({'expressions':
+                  [ ((item.obj.expressions | default([])) | first
+                     | default({'_type': 'EXPRESSION'}, true))
+                    | combine({'operator': 'IN', 'locations': item.keep}) ]}) | to_json }}'
+          "{{ hs_api_url }}/volume-groups/{{ item.uuid | urlencode }}"
       register: _vgl_put
       changed_when: true
       failed_when: false
@@ -103,13 +127,23 @@
       loop: "{{ _vgl_changes }}"
       loop_control:
         label: "{{ item.name }} (-{{ item.remove | length }})"
-      when: not ansible_check_mode
+      when:
+        - not ansible_check_mode
+        # PUT targets the UUID, as every other write in this role does; a
+        # group the API returned without one cannot be addressed. Caught
+        # explicitly below rather than PUT to an empty path.
+        - item.uuid | length > 0
 
     - name: Fail if any volume group update was rejected
       ansible.builtin.fail:
         msg: |
           Removing volumes from volume group '{{ item.item.name }}' failed with
           HTTP {{ (item.stdout_lines | default(['0']))[-1] | default('0') }}.
+
+          PUT {{ hs_api_url }}/volume-groups/{{ item.item.uuid }}
+
+          The API said:
+            {{ (item.stdout_lines | default([]))[:-1] | join('\n  ') | trim | default('(empty response body)', true) }}
 
           The volumes have NOT been deleted — decommission stopped here so the
           groups and the volumes stay consistent. Re-run after resolving the
@@ -119,6 +153,11 @@
         label: "{{ item.item.name | default('?') }}"
       when:
         - not ansible_check_mode
+        # A skipped item has no stdout_lines, so the default(['0']) below would
+        # read as HTTP 0 and report a rejection for a PUT that never ran. See
+        # the 2026-09-03 (c) loop-skip incident: a `when`-skipped LOOP still
+        # registers one results entry per item.
+        - not (item.skipped | default(false))
         - ((item.stdout_lines | default(['0']))[-1] | default('0') | int) not in [200, 201, 202]
 
     - name: Report volume group removal complete

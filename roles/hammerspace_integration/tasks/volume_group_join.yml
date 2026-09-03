@@ -99,6 +99,27 @@
                   '{{ hs_api_url }}/volume-groups' | jq -r '.[].name'
           when: _vg_status | int != 200
 
+        # Every other PUT in this role targets .../uoid.uuid (az_map,
+        # create_share, dns_update, ad_join, set_location, create_s3_user).
+        # This file used to PUT to the group NAME. A GET by name works, so the
+        # read half looked fine and the write half returned HTTP 400.
+        - name: Resolve the volume group UUID
+          ansible.builtin.set_fact:
+            _vg_uuid: "{{ _vg_json.uoid.uuid | default('') }}"
+
+        - name: Fail if the volume group has no UUID
+          ansible.builtin.fail:
+            msg: |
+              The API returned volume group '{{ hammerspace_volume_group }}'
+              without a uoid.uuid, so there is no identifier to PUT to.
+
+              Response keys: {{ _vg_json.keys() | list }}
+
+              Inspect the object:
+                curl -sk -u '{{ hammerspace_api_user }}:<password>' \
+                  '{{ hs_api_url }}/volume-groups/{{ hammerspace_volume_group | urlencode }}' | jq .
+          when: _vg_uuid | length == 0
+
         - name: Determine which volumes are not yet members
           ansible.builtin.set_fact:
             _vg_existing_locations: "{{ _vg_json.expressions[0].locations | default([]) }}"
@@ -134,18 +155,30 @@
             # existing + new, in that order. Existing entries are carried over
             # verbatim rather than rebuilt, so any fields the API sets on them
             # survive the round trip.
+            - name: Build the new location list
+              ansible.builtin.set_fact:
+                _vg_new_locations: >-
+                  {{ _vg_existing_locations + (_vg_to_add | map('regex_replace', '^(.*)$',
+                     '{"_type": "VOLUME_LOCATION", "extendedInfo": {}, "storageVolume":
+                     {"_type": "STORAGE_VOLUME", "extendedInfo": {}, "name": "\1"}}')
+                     | map('from_json') | list) }}
+
+            # The payload is the OBJECT THE API JUST RETURNED with only the
+            # locations replaced — not a fresh dict with three keys. A PUT to
+            # /volume-groups/<uuid> replaces the resource, so a hand-built body
+            # silently drops uoid, internalId and any placement objectives the
+            # group carries. Round-tripping the fetched object keeps them.
             - name: Build the append-only payload
               ansible.builtin.set_fact:
-                _vg_payload:
-                  _type: "VOLUME_GROUP"
-                  name: "{{ hammerspace_volume_group }}"
-                  expressions:
-                    - operator: "IN"
-                      locations: >-
-                        {{ _vg_existing_locations + (_vg_to_add | map('regex_replace', '^(.*)$',
-                           '{"_type": "VOLUME_LOCATION", "extendedInfo": {}, "storageVolume":
-                           {"_type": "STORAGE_VOLUME", "extendedInfo": {}, "name": "\1"}}')
-                           | map('from_json') | list) }}
+                _vg_payload: >-
+                  {{ _vg_json | combine({'expressions':
+                       [ _vg_expr0 | combine({'operator': 'IN',
+                                              'locations': _vg_new_locations}) ]
+                     }) }}
+              vars:
+                _vg_expr0: >-
+                  {{ (_vg_json.expressions | default([])) | first
+                     | default({'_type': 'EXPRESSION'}, true) }}
 
             - name: "Update volume group {{ hammerspace_volume_group }}"
               ansible.builtin.shell:
@@ -155,7 +188,7 @@
                   -H "Authorization: Basic {{ (hammerspace_api_user ~ ':' ~ hammerspace_api_password) | b64encode }}"
                   -X PUT -H "Content-Type: application/json"
                   -d '{{ _vg_payload | to_json }}'
-                  "{{ hs_api_url }}/volume-groups/{{ hammerspace_volume_group | urlencode }}"
+                  "{{ hs_api_url }}/volume-groups/{{ _vg_uuid | urlencode }}"
               register: _vg_put_raw
               changed_when: true
               failed_when: false
@@ -168,8 +201,18 @@
                   Updating volume group '{{ hammerspace_volume_group }}' failed
                   with HTTP {{ (_vg_put_raw.stdout_lines | default(['0']))[-1] | default('0') }}.
 
+                  PUT {{ hs_api_url }}/volume-groups/{{ _vg_uuid }}
+
+                  The API said:
+                    {{ (_vg_put_raw.stdout_lines | default([]))[:-1] | join('\n  ') | trim | default('(empty response body)', true) }}
+
                   No volumes were added. Existing members are unaffected — the
                   update is a single atomic PUT that either applies or does not.
+
+                  The curl task carries no_log (its command line holds the API
+                  password), so the body above is the only record of what the
+                  API objected to — it is reproduced here deliberately. The
+                  response cannot contain the credential.
               when:
                 - not ansible_check_mode
                 - ((_vg_put_raw.stdout_lines | default(['0']))[-1] | default('0') | int) not in [200, 201, 202]
