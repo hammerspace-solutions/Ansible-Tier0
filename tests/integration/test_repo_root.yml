@@ -30,57 +30,87 @@
 
   tasks:
     # ========================================================================
-    # TEST 1: vars/main.yml defines repo_root with the right template literal
-    # (read the RAW file text — include_vars would render the template)
+    # TEST 1: vars/main.yml defines repo_root conditionally on where the
+    # playbook lives (read the RAW file text — include_vars would render it).
     # ========================================================================
     - name: 'TEST 1: vars/main.yml defines repo_root literal'
       vars:
-        # Build the expected literal string WITHOUT having Ansible template it.
-        # The literal we want to find is:  repo_root: "{{ playbook_dir }}/.."
-        _expected: '{% raw %}repo_root: "{{ playbook_dir }}/.."{% endraw %}'
+        # Build the expected literal WITHOUT having Ansible template it.
+        # Inner single quotes are doubled — YAML single-quoted style.
+        _expected: '{% raw %}repo_root: "{{ (playbook_dir | dirname) if (playbook_dir | basename) == ''plays'' else playbook_dir }}"{% endraw %}'
+        _old: '{% raw %}repo_root: "{{ playbook_dir }}/.."{% endraw %}'
       block:
         - name: Read vars/main.yml as text
           ansible.builtin.slurp:
             src: "{{ playbook_dir }}/../../vars/main.yml"
           register: _vars_main_raw
 
-        - name: 'TEST 1 ASSERT: vars/main.yml contains the repo_root template line'
+        - name: 'TEST 1 ASSERT: repo_root is defined conditionally'
           ansible.builtin.assert:
             that:
               - _expected in (_vars_main_raw.content | b64decode)
+              # The unconditional form was only correct for plays/; a top-level
+              # playbook already has playbook_dir == repo root, so it resolved
+              # one level too high.
+              - _old not in (_vars_main_raw.content | b64decode)
             fail_msg: |
               vars/main.yml must contain (literally): {{ _expected }}
+              and must NOT contain the unconditional form: {{ _old }}
               Actual head of file:
               {{ (_vars_main_raw.content | b64decode).split('\n')[0:30] | join('\n') }}
 
         - ansible.builtin.set_fact:
-            _test_passes: "{{ _test_passes + ['TEST 1: repo_root defined in vars/main.yml'] }}"
+            _test_passes: "{{ _test_passes + ['TEST 1: repo_root defined conditionally in vars/main.yml'] }}"
       rescue:
         - ansible.builtin.set_fact:
             _test_failures: "{{ _test_failures + ['TEST 1: ' ~ (ansible_failed_result.msg | default('unknown'))] }}"
 
     # ========================================================================
-    # TEST 2: when playbook_dir is plays/, repo_root resolves to repo root
+    # TEST 2: repo_root must resolve to the repo root from BOTH layouts —
+    # plays/ (site.yml's import_playbook) and the repo root itself
+    # (decommission_tier0.yml, preflight_check.yml, reset-tier0-host.yml).
+    #
+    # The second case is the 2026-09-03 incident: the unconditional
+    # `{{ playbook_dir }}/..` produced
+    #   python3: can't open file '.../Ansible-Tier0/../cleanup_instance_nodes.py'
     # ========================================================================
-    - name: 'TEST 2: repo_root + plays/ resolves to repo root'
+    - name: 'TEST 2: repo_root resolves from plays/ AND from the repo root'
       block:
-        - name: Simulate playbook_dir under plays/
+        - name: Resolve repo_root the way vars/main.yml does
           ansible.builtin.set_fact:
-            _fake_playbook_dir: "/home/rocky/ansible/Ansible-Tier0/plays"
-            _fake_repo_root: "/home/rocky/ansible/Ansible-Tier0/plays/.."
+            _resolved: >-
+              {{ (item | dirname) if (item | basename) == 'plays' else item }}
+          loop:
+            - "/home/rocky/ansible/Ansible-Tier0/plays"
+            - "/home/rocky/ansible/Ansible-Tier0"
+          register: _rr
 
-        - name: 'TEST 2 ASSERT: repo_root + /vars/vault.yml resolves correctly'
+        - name: 'TEST 2 ASSERT: both layouts land on the repo root'
           ansible.builtin.assert:
             that:
-              - (_fake_repo_root ~ '/vars/vault.yml') is regex('/Ansible-Tier0/plays/\.\./vars/vault\.yml$')
+              - _paths | unique | length == 1
+              - _paths | first == '/home/rocky/ansible/Ansible-Tier0'
+              # No '/..' left in the path: the old form produced a working but
+              # ugly path from plays/ and a BROKEN one from the repo root.
+              - "'..' not in (_paths | first)"
+            fail_msg: |
+              repo_root does not resolve to the repo root from both layouts.
+              Got: {{ _paths }}
+              A top-level playbook has playbook_dir == the repo root already;
+              appending '/..' walks out of the repo.
+          vars:
+            _paths: "{{ _rr.results | map(attribute='ansible_facts._resolved') | map('trim') | list }}"
 
-        - name: 'TEST 2 ASSERT: repo_root + /container/Containerfile resolves correctly'
+        - name: 'TEST 2 ASSERT: a real repo file resolves from both'
           ansible.builtin.assert:
             that:
-              - (_fake_repo_root ~ '/container/Containerfile') is regex('/Ansible-Tier0/plays/\.\./container/Containerfile$')
+              - (_paths | first ~ '/vars/vault.yml') == '/home/rocky/ansible/Ansible-Tier0/vars/vault.yml'
+              - (_paths | first ~ '/cleanup_instance_nodes.py') == '/home/rocky/ansible/Ansible-Tier0/cleanup_instance_nodes.py'
+          vars:
+            _paths: "{{ _rr.results | map(attribute='ansible_facts._resolved') | map('trim') | list }}"
 
         - ansible.builtin.set_fact:
-            _test_passes: "{{ _test_passes + ['TEST 2: repo_root chains through plays/.. to reach repo root'] }}"
+            _test_passes: "{{ _test_passes + ['TEST 2: repo_root resolves to the repo root from plays/ and from the repo root itself'] }}"
       rescue:
         - ansible.builtin.set_fact:
             _test_failures: "{{ _test_failures + ['TEST 2: ' ~ (ansible_failed_result.msg | default('unknown'))] }}"

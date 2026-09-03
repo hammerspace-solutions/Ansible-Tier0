@@ -565,6 +565,99 @@
             _test_failures: "{{ _test_failures + ['TEST 6: ' ~ (ansible_failed_result.msg | default('unknown') | replace('\n', ' '))] }}"
 
     # ========================================================================
+    # TEST 7: the post-delete cascade verification must not draw a conclusion
+    # from a run where the delete never happened, and must not print a literal
+    # backreference. Both were wrong on the first real decommission:
+    #
+    #   TASK [Warn if any volume group kept a reference]
+    #     WARNING: 1 volume group reference(s) survived the delete...
+    #       - vg-tier0 still holds \1
+    #   TASK [Fail if volume or node deletion reported an error]
+    #     cleanup_instance_nodes.py exited 2.
+    #     python3: can't open file '.../Ansible-Tier0/../cleanup_instance_nodes.py'
+    #
+    # The script never ran, so of course every volume was still a member —
+    # yet the warning announced "this cluster's API does not cascade".
+    # ========================================================================
+    - name: 'TEST 7: cascade verification is gated and formats correctly'
+      block:
+        - name: Read the decommission playbook
+          ansible.builtin.slurp:
+            src: "{{ playbook_dir }}/../../decommission_tier0.yml"
+          register: _dc_src7
+
+        - name: Decode
+          ansible.builtin.set_fact:
+            _dc_raw7: "{{ _dc_src7.content | b64decode }}"
+
+        - name: 'TEST 7 ASSERT: verification requires the delete to have succeeded'
+          ansible.builtin.assert:
+            that:
+              - "'_dc_cleanup.rc | default(1)) == 0' in _dc_raw7"
+            fail_msg: |
+              REGRESSION: the cascade verification is not gated on the
+              deletion succeeding. cleanup_instance_nodes.py carries
+              failed_when: false, so its failure is reported by a LATER task —
+              a delete that never ran leaves every volume in its group and the
+              verification then reports "the delete did not cascade", which is
+              a wrong diagnosis of a run that deleted nothing.
+
+        # Comment lines are stripped first: the file documents the old bug,
+        # so a naive substring search matches its own explanation.
+        - name: Strip comments from the playbook text
+          ansible.builtin.set_fact:
+            _dc_code7: "{{ _dc_raw7.split('\n') | reject('search', '^\\s*#') | join('\n') }}"
+
+        - name: 'TEST 7 ASSERT: no regex backreference is used to build strings'
+          ansible.builtin.assert:
+            that:
+              # Building the message with map('regex_replace', ...) and a
+              # backreference did not substitute; it printed a literal
+              # backslash-one into the operator-facing warning.
+              - "'regex_replace' not in _dc_code7"
+            fail_msg: |
+              The dangling-reference message builds strings with regex_replace
+              and a backreference. Collect {group, volumes} and format them in
+              the message template instead.
+
+
+        - name: Simulate the collection and rendering
+          ansible.builtin.set_fact:
+            _dangling: >-
+              {{ [{'group': 'vg-tier0',
+                   'volumes': ['AZ1:node-1::/nvme/tier0', 'AZ1:node-2::/nvme/tier0']}] }}
+
+        - name: 'TEST 7 ASSERT: the rendered warning names the volumes'
+          ansible.builtin.assert:
+            that:
+              - _rendered is search('vg-tier0')
+              - _rendered is search('AZ1:node-1::/nvme/tier0')
+              - _rendered is search('AZ1:node-2::/nvme/tier0')
+              # The count is the number of VOLUMES, not of groups.
+              - _count == 2
+              - "'\\1' not in _rendered"
+            fail_msg: |
+              The dangling-reference message does not render the group and its
+              volumes. Got count={{ _count }}:
+              {{ _rendered }}
+          vars:
+            _count: "{{ _dangling | map(attribute='volumes') | map('length') | sum }}"
+            _rendered: |
+              {% for d in _dangling %}
+                {{ d.group }}
+              {% for v in d.volumes %}    - {{ v }}
+              {% endfor %}
+              {% endfor %}
+
+        - name: Record TEST 7 pass
+          ansible.builtin.set_fact:
+            _test_passes: "{{ _test_passes + ['TEST 7: cascade verification gated on delete success, message renders group + volumes'] }}"
+      rescue:
+        - name: Record TEST 7 failure
+          ansible.builtin.set_fact:
+            _test_failures: "{{ _test_failures + ['TEST 7: ' ~ (ansible_failed_result.msg | default('unknown') | replace('\n', ' '))] }}"
+
+    # ========================================================================
     # Report
     # ========================================================================
     - name: Print test report

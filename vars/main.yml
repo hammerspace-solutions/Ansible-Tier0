@@ -14,7 +14,22 @@
 #
 # 2026-05-15 incident: vault.yml lookup pointed at plays/vars/vault.yml.
 # 2026-05-18 incident: DI Containerfile lookup pointed at plays/container/.
-repo_root: "{{ playbook_dir }}/.."
+#
+# 2026-09-03 incident: the unconditional `{{ playbook_dir }}/..` above was
+# only correct for playbooks UNDER plays/. Top-level playbooks
+# (decommission_tier0.yml, preflight_check.yml, reset-tier0-host.yml, ...)
+# already have playbook_dir == the repo root, so it resolved one level too
+# high and produced
+#
+#   python3: can't open file '/shared/home/cycleadmin/Ansible-Tier0/../cleanup_instance_nodes.py'
+#
+# It went unnoticed because the one thing every top-level playbook uses it for
+# — include_vars of vars/vault.yml — carries `failed_when: false`, so a wrong
+# path silently loaded nothing instead of failing.
+#
+# So it is conditional on where the playbook actually lives. Note `| dirname`
+# rather than appending '/..', so the result is a clean absolute path.
+repo_root: "{{ (playbook_dir | dirname) if (playbook_dir | basename) == 'plays' else playbook_dir }}"
 
 # ============================================================================
 # RAID Configuration

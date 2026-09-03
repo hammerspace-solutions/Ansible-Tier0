@@ -399,6 +399,13 @@
       when:
         - not ansible_check_mode
         - _dc_volumes | length > 0
+        # Only meaningful if the deletion actually ran. cleanup_instance_nodes.py
+        # carries failed_when: false so its own failure is reported by the task
+        # AFTER this one; without this guard a delete that never happened (rc 2,
+        # script not found) leaves every volume in its group and this block
+        # concludes "this cluster's API does not cascade" — a wrong diagnosis
+        # from a run where nothing was deleted at all.
+        - (_dc_cleanup.rc | default(1)) == 0
       delegate_to: localhost
       run_once: true
       become: false
@@ -433,16 +440,25 @@
               '{{ hs_api_url }}/volume-groups' | jq -r '.[].name'
           when: _dc_vg_status | int != 200
 
+        # Collected as {group, volumes} dicts and formatted in the message.
+        # An earlier version built the strings with
+        # map('regex_replace', '^(.*)$', name ~ ' still holds \\1') and the
+        # backreference never substituted — the warning printed a literal
+        # "vg-tier0 still holds \\1". Don't reach for regex_replace to
+        # concatenate.
         - name: Collect any remaining references to the deleted volumes
           ansible.builtin.set_fact:
             _dc_dangling: >-
-              {{ (_dc_dangling | default([])) +
-                 ((item.expressions[0].locations | default([]))
-                  | selectattr('storageVolume.name', 'defined')
-                  | selectattr('storageVolume.name', 'in', _dc_volumes)
-                  | map(attribute='storageVolume.name')
-                  | map('regex_replace', '^(.*)$', (item.name | default('?')) ~ ' still holds \\1')
-                  | list) }}
+              {{ (_dc_dangling | default([])) + ([{
+                   'group': item.name | default('?'),
+                   'volumes': _dc_hits
+                 }] if (_dc_hits | length > 0) else []) }}
+          vars:
+            _dc_hits: >-
+              {{ (item.expressions[0].locations | default([]))
+                 | selectattr('storageVolume.name', 'defined')
+                 | selectattr('storageVolume.name', 'in', _dc_volumes)
+                 | map(attribute='storageVolume.name') | list }}
           loop: "{{ _dc_vg_all | selectattr('expressions', 'defined') | list }}"
           loop_control:
             label: "{{ item.name | default('?') }}"
@@ -464,15 +480,19 @@
         - name: Warn if any volume group kept a reference
           ansible.builtin.debug:
             msg: |
-              WARNING: {{ _dc_dangling | length }} volume group reference(s)
-              survived the delete on this cluster:
+              WARNING: {{ _dc_dangling | map(attribute='volumes') | map('length') | sum }}
+              volume group reference(s) survived the delete:
               {% for d in _dc_dangling %}
-                - {{ d }}
+                {{ d.group }}
+              {% for v in d.volumes %}    - {{ v }}
               {% endfor %}
-
+              {% endfor %}
               The volumes and nodes ARE deleted; only the group membership is
-              stale. This cluster's API does not cascade, so re-run future
-              decommissions with:
+              stale, so this run did its job. But the delete did not cascade
+              here, which it normally does — a volume in more than one group is
+              the case to check first.
+
+              Re-run future decommissions with:
 
                 -e decommission_explicit_volume_group_leave=true
 
