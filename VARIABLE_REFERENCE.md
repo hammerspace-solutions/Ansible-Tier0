@@ -1,9 +1,32 @@
 # Variable Reference
 
-Complete reference for all configurable variables in the Hammerspace Tier 0 Ansible automation.
+Every setting in the Hammerspace Tier 0 Ansible automation, with its default
+and what it does.
 
-**Priority**: Variables in `vars/main.yml` override role `defaults/main.yml`.
-Vault-encrypted values live in `vars/vault.yml`.
+**Where to set things:** site settings go in `vars/main.yml`; passwords go in
+`vars/vault.yml` (encrypt it with `ansible-vault encrypt vars/vault.yml`).
+Anything you set in `vars/main.yml` overrides the role defaults. Anything can
+also be passed on the command line with `-e name=value`.
+
+---
+
+## Start here — the settings most sites change
+
+| Variable | Set it to | Why |
+|----------|-----------|-----|
+| `hammerspace_api_host` | Your Anvil management IP | The one value every deployment needs. The NFS export list, network test and DI settings follow it automatically. |
+| `vault_hammerspace_api_password` | The admin password, in `vars/vault.yml` | Used for every API call. |
+| `client_subnets` | The subnets your NFS clients are on | Ships as `0.0.0.0/0`; narrow it before production. |
+| `hammerspace_nodes` | Extra Anvil / DSX IPs, if any | The Anvil is included already. Listed IPs get `no_root_squash`. |
+| `storage_type` | `nvme` (default), or `scsi` for `/dev/sd*` disks | Which drives are discovered. |
+| `hammerspace_volume_group` | The name of your Tier 0 volume group | Volumes are added to it on every run. Must exist already. |
+| `hammerspace_tier0_place_on_group` | `true` | Applies the group's placement objective to your shares so new files land on Tier 0 first. |
+| `hammerspace_volume_az_prefix_enabled` | `true` on multi-zone deployments | Puts `AZ1:` etc. on volume names. |
+| `hammerspace_api_validate_certs` | `true` once the Anvil has a trusted certificate | Off by default for self-signed certificates. |
+| `deploy_di` | `true` if you are deploying mover nodes | Off by default. |
+
+Everything else has a working default. The sections below are grouped by
+topic in roughly the order the playbook uses them.
 
 ---
 
@@ -48,7 +71,7 @@ Vault-encrypted values live in `vars/vault.yml`.
 | `nvme_exclude_numa_nodes` | `[]` | Exclude all drives on specific NUMA nodes. |
 | `nvme_exclude_pcie_addresses` | `[]` | Exclude by PCIe address (e.g., `0000:03:00.0`). |
 | `nvme_exclude_pcie_prefixes` | `[]` | Exclude by PCIe bus prefix (e.g., `0000:03`). |
-| `additional_exclude_devices` | `[]` | **Unused.** Declared in `roles/nvme_discovery/defaults/main.yml` but referenced by no task — setting it has no effect. Use `nvme_exclude_devices` / `scsi_exclude_devices` instead. |
+| `additional_exclude_devices` | `[]` | Has no effect — kept for compatibility. Use `nvme_exclude_devices` / `scsi_exclude_devices`. |
 
 ## SCSI/SATA Device Exclusion
 
@@ -82,7 +105,7 @@ Used when `use_dynamic_discovery: false`.
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `hammerspace_api_host` | `"10.0.10.15"` | Anvil management IP for API access. |
+| `hammerspace_api_host` | *(set per site)* | Anvil management IP for API access. Set once; other settings derive from it. |
 | `hammerspace_api_user` | `"admin"` | API username (admin role required). |
 | `hammerspace_api_password` | `"{{ vault_hammerspace_api_password }}"` | API password. Sourced from Ansible Vault. |
 | `hammerspace_api_port` | `8443` | API port. |
@@ -90,6 +113,9 @@ Used when `use_dynamic_discovery: false`.
 | `hammerspace_api_curl_timeout` | `60` | Per-request curl timeout in seconds. |
 | `hammerspace_api_method` | `"auto"` | API HTTP method: `auto` (detect Python version), `curl` (always), `uri` (always). |
 | `hammerspace_debug` | `false` | Enable debug output for API calls. |
+| `hammerspace_keyvault_uri` | *(unset)* | **Azure only, opt-in.** Pull the admin password from this Key Vault (`https://<vault>.vault.azure.net`) instead of `vars/vault.yml`. |
+| `hammerspace_keyvault_secret_name` | *(unset)* | Name of the secret in that vault. |
+| `hammerspace_keyvault_auth_source` | `"auto"` | How the control machine authenticates to Azure: `auto`, `cli`, `credential_file`, `env`, `msi`. |
 
 ## Volume Configuration
 
@@ -156,7 +182,8 @@ Used when `use_dynamic_discovery: false`.
 | `hammerspace_azure_imds_az` | `false` | Query Azure IMDS for `zone` / `platformFaultDomain`. Enable on Azure. |
 | `azure_imds_api_version` | `"2021-02-01"` | Azure IMDS API version. |
 | `azure_imds_timeout` | `5` | IMDS request timeout in seconds. |
-| `_cloud_az_detected` | *(computed)* | Shared AZ expression. See below — **do not** re-derive the AZ elsewhere. |
+| `hammerspace_gpu_fabric_az` | `false` | **OCI GPU only.** Derive the AZ from the instance's GPU memory fabric; instances on the same fabric share an AZ. |
+| `hammerspace_gpu_fabric_az_update_file` | `true` | Record each node's fabric → AZ mapping in `gpu_fabric_data.txt` for later runs. |
 
 ### Cloud placement host variables
 
@@ -176,18 +203,8 @@ matching `^AZ[0-9]+$` > `hammerspace_default_az`.
 `azure_zone` is an **empty string** — not absent — on non-zonal Azure VMs
 (availability sets), so it is tested for length rather than `is defined`.
 
-### `_cloud_az_detected`
-
-Defined once in `vars/main.yml` and consumed by `az_map.yml` (node AZ label),
-`add_volume.yml` (volume-name prefix) and `plays/storage.yml`
-(`instance_report.csv`). Adding a provider means editing that one expression,
-not the three call sites.
-
-It renders to `None` (not `""`) when nothing matches, because `jinja2_native`
-is enabled. **Always consume it as `_cloud_az_detected | default('', true) |
-trim`** — a plain `| default('')` does not catch `None`, and `None | trim`
-stringifies to the literal `"None"`, which then becomes the AZ label.
-`tests/integration/test_azure_az_map.yml` audits all three call sites.
+The same detected value is used for the node's AZ label, the volume-name
+prefix and `instance_report.csv`, so the three always agree.
 
 ## Volume Groups
 
@@ -212,6 +229,10 @@ stringifies to the literal `"None"`, which then becomes the AZ label.
 |----------|---------|-------------|
 | `hammerspace_apply_share_objectives` | `false` | Apply objectives to shares. |
 | `hammerspace_share_objectives` | *(undefined)* | List with `share_name`, `objective`, `applicability`. |
+| `hammerspace_tier0_place_on_group` | `false` | Apply the volume group's auto-created `place-on-<hammerspace_volume_group>` objective to each share in `hammerspace_shares`, so first instances land on Tier 0 instead of being spread across every volume (DSX-backed included). Requires `hammerspace_volume_group`. Missing objective/share/group is a hard failure. Selects the tier, not the node. |
+| `hammerspace_tier0_place_on_objective` | `place-on-<hammerspace_volume_group>` | Override the objective name if the group's objective was renamed. |
+| `hammerspace_tier0_place_on_shares` | names in `hammerspace_shares` | Shares to apply it to; set to target shares created outside this playbook. |
+| `hammerspace_tier0_place_on_applicability` | `TRUE` | Objective applicability expression, e.g. `LAST_USE_AGE<1*HOURS?TRUE`. |
 
 ## S3/Object Storage
 
@@ -246,6 +267,7 @@ stringifies to the literal `"None"`, which then becomes the AZ label.
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `nfs_threads` | `128` | NFS server thread count. Hammerspace recommends 128. |
+| `nfs_exportfs_strict` | `true` | Treat any warning from `exportfs -ra` as a failure. `exportfs` exits 0 even when it skips an entry, so the warning is the only sign that a path is not exported. |
 | `nfs_vers3` | `"y"` | Enable NFSv3. |
 | `nfs_vers4_0` | `"n"` | Enable NFSv4.0. |
 | `nfs_vers4_1` | `"n"` | Enable NFSv4.1. |
@@ -253,8 +275,8 @@ stringifies to the literal `"None"`, which then becomes the AZ label.
 | `nfs_rdma_enabled` | `"y"` | Enable NFS over RDMA. |
 | `nfs_rdma_port` | `20049` | RDMA port. |
 | `hammerspace_nodes` | `["{{ hammerspace_api_host }}"]` | Anvil/DSX IPs requiring `no_root_squash`. Defaults to the primary Anvil (no duplication); add secondary Anvils/DSX IPs here. |
-| `mover_nodes` | `["10.0.12.242"]` | Mover/DI node IPs requiring `no_root_squash`. |
-| `client_subnets` | `["0.0.0.0/0"]` | Client subnets with `root_squash`. |
+| `mover_nodes` | `[]` | Mover/DI node IPs requiring `no_root_squash` — every data-path IP a DSX uses to reach the node. DI nodes in `di_nodes` are added automatically (`di_auto_export`). |
+| `client_subnets` | `["0.0.0.0/0"]` | Client subnets with `root_squash`. exports(5) matches by entry TYPE (single host > IP network > wildcard > netgroup > `*`), not line order; a second subnet after `0.0.0.0/0` is never matched. |
 | `hammerspace_export_opts` | `"rw,no_root_squash,sync,secure,mp,no_subtree_check"` | Export options for Hammerspace nodes. |
 | `client_export_opts` | `"rw,root_squash,sync,secure,mp,no_subtree_check"` | Export options for clients. |
 | `nfs_exports` | *(undefined)* | Manual NFS exports (when `use_dynamic_discovery: false`). |
@@ -310,8 +332,47 @@ Each section can be toggled independently. Role defaults live in `roles/perf_tun
 | `perf_irq_pinning_stop_irqbalance` | `true` | Stop and disable `irqbalance` (it fights manual pinning). |
 | `perf_tcp_sysctl_enabled` | `true` | Apply high-throughput TCP sysctl tunables (`rmem/wmem_max=256MB`, `tcp_mtu_probing=1`, etc.). |
 | `perf_tcp_sysctl` | *(dict)* | Override individual sysctl values. See role defaults for the full map. |
+| `perf_vm_writeback_enabled` | `false` | **Opt-in.** Cap dirty page cache for bulk NFS-client ingest (azcopy, rsync, cp). See note below. |
+| `perf_vm_writeback` | *(dict)* | `vm.dirty_background_bytes` = 256 MB, `vm.dirty_bytes` = 1 GB. |
+| `perf_vm_writeback_sysctl_filename` | `99-hammerspace-vm-writeback.conf` | Filename written under `/etc/sysctl.d/`. |
 
 **Run just the perf section:** `ansible-playbook site.yml --tags perf`
+
+**Run just the writeback limits:** `ansible-playbook site.yml --tags writeback -e perf_vm_writeback_enabled=true`
+
+### `perf_vm_writeback` — dirty page cache limits for NFS ingest
+
+Everything else in this role tunes the NFS **server** (nfsd threads, sunrpc pools,
+read-ahead, IRQ affinity) or the wire (TCP buffers). `perf_vm_writeback` is the
+only client-side writeback knob: it caps how much dirty page cache a bulk writer
+on an NFS *mount* may accumulate before the kernel throttles it.
+
+With no explicit cap the limit is `vm.dirty_ratio` = 20 % of available memory. On a
+large-memory ingest host that is hundreds of GB of dirty NFS pages, which looks from
+the outside like the ingest tool consuming enormous amounts of memory — the pages are
+charged to the page cache and to `NFS_Unstable`, not to the process RSS.
+
+**Off by default**, because the knob is global rather than per-mount: on a Tier 0
+`storage_server` it also throttles writeback to the local NVMe / MD array behind
+`/hammerspace/hsvol*`. Enable it on hosts whose job is NFS ingest.
+
+**Set one form per limit, never both.** `vm.dirty_bytes` and `vm.dirty_ratio` are one
+limit in two units, and the kernel keeps them exclusive by zeroing the other on write.
+A file containing both therefore means "whichever line came last". The role refuses a
+mixed configuration rather than persisting one whose meaning depends on line order,
+and it also refuses:
+
+| Configuration | Why it is refused |
+|---|---|
+| `vm.dirty_bytes` **and** `vm.dirty_ratio` (same for the `_background_` pair) | Writing either zeroes the other; the result depends on line order. |
+| `vm.dirty_ratio: 0` or `vm.dirty_background_ratio: 0` | A zero-page threshold, not "unlimited". The kernel sets the ratio to 0 itself when you set the `_bytes` form — you never write it. |
+| a `*_bytes` value below two pages | Silently ignored by the kernel; the previous value is retained. |
+| `vm.dirty_background_bytes` ≥ `vm.dirty_bytes` | The kernel substitutes `vm.dirty_bytes / 2` for the background threshold. |
+
+The role reads the values back from `/proc/sys/vm/` after applying them and fails if
+the kernel did not keep them, and warns when another file under `/etc/sysctl.d/` (or
+`/etc/sysctl.conf`, which `sysctl --system` applies last) sets a `vm.dirty_*` key that
+would revert the tuning on the next boot.
 
 ## Safety Settings
 
@@ -320,7 +381,7 @@ Each section can be toggled independently. Role defaults live in `roles/perf_tun
 | `skip_confirmation` | `false` | Skip confirmation prompts. Use with caution. |
 | `force_raid_recreate` | `false` | Force RAID recreation. **DESTRUCTIVE**. Overrides both the same-name skip and the new device-membership skip (the latter detects an array assembled under a different kernel name e.g. `md127`, remaps mounts to it, and skips `mdadm --create`). Set `true` only when you actually want to nuke the existing array. |
 | `force_fs_recreate` | `false` | Force filesystem recreation. **DESTRUCTIVE**. |
-| `allow_empty_protected_disks` | `false` | **DANGEROUS.** Bypass the boot-drive safety gate. When `false` (default), the playbook hard-fails if it can't identify any disks hosting `/`, a mounted FS, or active swap — the last line of defense against `mkfs` on the OS disk. (As of 2026-05-18, md array members and LVM PVs are NOT in this strict list — they live in `_md_member_disks` / `_lvm_pv_disks` and are adopted by `raid_setup` instead of blocked.) Set to `true` only on diskless / netboot systems with no OS disk to protect. **Do not reach for this when a normal host trips the gate** — as of 2026-08-26 detection resolves mounts through `MAJ:MIN` rather than the mount `SOURCE` string, and the failure message dumps the host's mount/swap/sysfs topology. Read that dump first; an empty list on a host that has an OS disk is a detection bug, not a case for this override. |
+| `allow_empty_protected_disks` | `false` | **DANGEROUS.** Bypasses the boot-drive safety gate. When `false` (default) the playbook stops if it cannot identify the disk(s) holding `/`, other system mounts or active swap — the last line of defence against formatting the OS disk. Set `true` only on diskless / netboot systems that have no OS disk. **Do not use it to silence the gate on a normal server** — the failure message prints the server's mount, swap and block-device layout; read that first, and if the server does have an OS disk, report it to Hammerspace support. Existing `md` arrays and LVM volumes are not part of this gate; they are adopted, not blocked. |
 
 ## Pre-Setup Validation (Precheck)
 
@@ -358,8 +419,8 @@ Each section can be toggled independently. Role defaults live in `roles/perf_tun
 |----------|---------|-------------|
 | `deploy_di` | `false` | Master switch: enable DI deployment on `di_nodes` group. |
 | `di_activate` | `true` | Activation control: `true` = full deploy; `false` = install only, skip services and registration. Activate later with `--tags di-activate -e di_activate=true`. |
-| `di_auto_export` | `true` | Auto-wire DI node IPs into Tier 0 NFS exports (`no_root_squash`). Eliminates manual `mover_nodes` editing. |
-| `di_deployment_type` | `"host"` | Deployment mode: `"host"` (RPM install), `"container"` (podman/docker), or `"kubernetes"` (DaemonSet on containerd). |
+| `di_auto_export` | `true` | Auto-wire DI node IPs into Tier 0 NFS exports (`no_root_squash`). Runs on every `site.yml` run whenever `di_nodes` is populated — not only with `deploy_di` — because the storage play regenerates `/etc/exports` each run. |
+| `di_deployment_type` | *(set explicitly)* | Deployment mode: `"host"` (RPM install), `"container"` (podman/docker), or `"kubernetes"` (DaemonSet on containerd). Set it in `vars/main.yml` rather than relying on the shipped value. |
 
 ## DI Container Settings
 
@@ -392,7 +453,7 @@ Each section can be toggled independently. Role defaults live in `roles/perf_tun
 | `di_rpm_source` | `"directory"` | Source mode: `"url"`, `"local"`, `"directory"`. |
 | `di_tarball_url` | *(Hammerspace URL)* | Tarball download URL (when `di_rpm_source == "url"`). |
 | `di_tarball_local_path` | *(undefined)* | Controller-local tarball path (when `di_rpm_source == "local"`). |
-| `di_payload_local_dir` | `"{{ playbook_dir }}/payload"` | Directory with loose RPMs (when `di_rpm_source == "directory"`). |
+| `di_payload_local_dir` | `"{{ repo_root }}/payload"` | Directory with loose RPMs (when `di_rpm_source == "directory"`). |
 | `babeltrace_rpm_url` | *(Rocky Linux URL)* | Babeltrace RPM URL (RedHat only). |
 | `di_add_node_script_url` | *(Hammerspace URL)* | Fallback URL for `add_node.py`. |
 | `di_tmp_dir` | `"/tmp/di_install"` | Temp directory for tarball extraction. |
@@ -484,15 +545,10 @@ controller and talks only to the API.
 | `decommission_confirm` | `false` | Safety gate — must be passed as `-e decommission_confirm=true` to proceed. Without it the play prints the plan and stops. |
 | `decommission_explicit_volume_group_leave` | `false` | Remove volumes from their volume groups with an explicit PUT *before* deleting them. Not needed: deleting a volume removes it from its groups, and the playbook verifies that after the delete. Set to `true` only if the post-delete verification warns that references survived. |
 
-Deleting a storage volume removes it from every volume group that holds it, so
-the playbook lets the delete cascade and then re-reads the groups to confirm.
-If any group kept a reference it warns — loudly, but without failing, since the
-volumes and nodes are already gone by that point — and names the flag above.
-
-The explicit PUT path is kept because it is the only option for a cluster whose
-API does not cascade. It is not the default because a PUT replaces the whole
-group object, so it has to round-trip every field the API set, including the
-placement objectives.
+Deleting a storage volume also removes it from its volume groups, so the
+playbook relies on that and then re-reads the groups to confirm. If a group
+still references a deleted volume it prints a warning (without failing — the
+volumes and nodes are already gone) and names the flag above.
 
 ## Tier 0 Host Reset (reset-tier0-host.yml)
 

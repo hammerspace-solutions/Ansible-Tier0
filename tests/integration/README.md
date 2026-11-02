@@ -1,5 +1,9 @@
 # Integration tests
 
+> **Audience: engineers changing the automation.** These tests check the
+> playbook's own logic on a laptop; they are not part of a deployment. If you
+> are deploying Tier 0, start at [README.md](../../README.md).
+
 Self-contained Ansible playbooks that exercise critical safety paths
 without needing remote hosts. They run against `localhost` with
 `connection: local`, so they are safe to run on a developer laptop
@@ -473,6 +477,108 @@ Test cases:
 | 4 | Fixed template + `rc=1` (unload failed, module in use) | Renders `REBOOT` — the branch still fires |
 | 5 | `sunrpc_unload` undefined + `pool_mode=pernode` | Renders `OK` — `is defined` short-circuits cleanly |
 
+## `test_share_objective_status.yml`
+
+Pins the 2026-09-18 field report: a write from a Tier 0 node went to the DSX
+first. Two defects — `share_apply_objective.yml` never checked the HTTP status
+of `objective-set` (a 4xx has no `Location`, so the poll was skipped and
+"applied" was printed), and joining a volume group placed nothing because no
+objective pointed at it. `tier0_place_on_group.yml` applies the group's
+auto-created `place-on-<group>`.
+
+| # | Scenario | Expected |
+|---|----------|----------|
+| 1 | Registered POST result: 404 body, code on last line, no `Location` | Status gate fires; the old task-status gate alone would not have (poll skipped) |
+| 2 | 202 + `Location` | Passes the gate, proceeds to the poll — no false positive |
+| 3 | **Audit** `share_apply_objective.yml` | POST is `no_log` + `failed_when: false`; a fail task gated on `status not in [200, 201, 202]` prints the body; no `-o /dev/stdout`; `run_once` on every task |
+| 4 | Derivation | `place-on-<hammerspace_volume_group>`; shares from `hammerspace_shares`; overrides honoured; an EMPTY override string falls back |
+| 5 | **Audit** `tier0_place_on_group.yml` + wiring | Included after `create_share.yml`, gated on the flag, `run_once`, GET-only on `/objectives/`, hard failure on `!= 200` / empty group / empty share list, lookup `no_log` + `failed_when: false`, defaults + docs present |
+
+Mutation-tested: dropping the status gate, one `run_once`, `failed_when`, the
+`!= 200` failure, or the empty-share failure each fails the relevant test.
+
+## `test_nfs_exports_hardening.yml`
+
+2026-09-18 NFS field report follow-up. Pins the DI-export persistence bug
+(`di_exports.yml` ended the play unless `deploy_di` was set, while the storage
+play regenerates `/etc/exports` every run), the unanchored `lineinfile` regexp
+(`10\.0\.12\.24` matched inside `10.0.12.242` and replaced the whole
+template line), the shipped example IP in `mover_nodes`, the unread
+`exportfs -ra` stderr, dead subnets after `0.0.0.0/0`, and the silent
+multi-NIC registration.
+
+| # | Scenario | Expected |
+|---|----------|----------|
+| 1 | Template exports line with `10.0.12.242`; probe `10.0.12.24` / `10.0.12.242` / `10.0.12.99` | Old `^path\s.*IP` matches the prefix (the defect); new `^path\s+IP\(` matches neither the template line nor a prefix, only a dedicated line; skip guard is exact |
+| 2 | `mount_points` undefined | Export paths recovered from `/etc/exports`, comments skipped, deduplicated |
+| 3 | `client_subnets` orderings | Subnet after `0.0.0.0/0` flagged; single host after it, or subnet before it, not flagged |
+| 4 | **Audit** | `di_exports.yml` gated on `groups['di_nodes']` never `deploy_di`, tagged `nfs-exports`, anchored regexp, skip guard, `hammerspace_nodes` excluded, `regex_findall` fallback; `mover_nodes: []`; exportfs registered + `failed_when: false` + strict gate on stderr; shadow warning; multi-NIC warning; `nfs_exportfs_strict` documented |
+
+Mutation-tested: old regexp, `deploy_di` gate, example IP, dropped exportfs
+gate — each fails TEST 4.
+
+## `test_vm_writeback.yml`
+
+Covers the opt-in NFS-client writeback caps (`perf_vm_writeback`). The tuning
+recipe that circulates for `azcopy` ingestion —
+
+```
+vm.dirty_background_bytes = 268435456
+vm.dirty_bytes            = 1073741824
+vm.dirty_background_ratio = 0
+vm.dirty_ratio            = 0
+```
+
+— silently discards its own first line. `vm.dirty_*_bytes` and
+`vm.dirty_*_ratio` are one limit in two units, and each kernel handler zeroes
+the other on write, so line 3 resets `dirty_background_bytes` to 0 and the
+background flush threshold ends up at 0 pages rather than 256 MB. Line 4 is a
+no-op only because line 2 already set the ratio to 0 and that handler acts on a
+change. The role therefore accepts one form per limit and refuses a mix.
+
+| # | Scenario | Expected |
+|---|----------|----------|
+| 1 | Simulate `dirty_background_bytes_handler` / `dirty_bytes_handler` / `dirty_background_ratio_handler` / `dirty_ratio_handler` over the four-line recipe | Final `dirty_bytes` = 1 GB survives, `dirty_background_bytes` = 0 — the 256 MB target is lost; derived thresholds 262144 / 0 pages |
+| 2 | Guard evaluated against 8 configs | Refuses the four-line recipe, both mixed forms, `*_ratio: 0`, a sub-two-page `*_bytes`, and `background >= dirty`; accepts `*_bytes`-only and `*_ratio`-only |
+| 3 | Shipped defaults + `vars/main.yml` | `*_bytes`-only, `background < dirty`, both above two pages, `perf_vm_writeback_enabled: false` in both, the two dicts identical, filename a bare `*.conf` |
+| 4 | **Audit** `vm_writeback.yml` (comment lines stripped first) | Exactly 2 read-only shell probes, each `check_mode: false`; verification gated `when: not ansible_check_mode`; `sysctl_file` pinned to `/etc/sysctl.d/{{ perf_vm_writeback_sysctl_filename }}` and never `/etc/sysctl.conf`; mutual-exclusion, two-page-minimum, ratio-zero and `background < dirty` conditions present; `LC_ALL=C LANG=C`; `executable: /bin/bash` |
+| 5 | **Audit** wiring + docs | `include_tasks: vm_writeback.yml` gated on `perf_vm_writeback_enabled | default(false)`, tagged `[perf, writeback]`, listed in the role summary; `VARIABLE_REFERENCE.md` documents the variables; `docs/TROUBLESHOOTING.md` names `dirty_background_bytes` and `NFS_Unstable` |
+
+| 6 | Post-apply verification against 5 synthetic read-back maps | Fails on an empty map, on empty values, on a partial read-back, and on a `*_bytes` that came back `0`; passes only when every requested key came back non-empty and non-zero. A `*_ratio` of `0` beside a set `*_bytes` is expected, not a failure |
+
+Note on TEST 4: the probes are read-only `shell` tasks whose output feeds the
+safety assert, so both must carry `check_mode: false` — `command`/`shell` are
+skipped under `--check` and a check-mode skip registers `stdout: ''`, which
+would let the guard pass on an empty page size. The verification assert is
+gated the other way (`when: not ansible_check_mode`): nothing was applied, so
+the read-back would be the host's pre-existing state.
+
+TEST 6 exists because of a bug found by smoke-running the role on a host with
+no `/proc/sys/vm`: the read-back exited 0 with **empty** values and the
+verification reported success for limits it had never read. `printf '%s' "$(cat
+missing)"` does not trip `set -e` — `printf` itself succeeds. The read-back now
+skips an unreadable knob, and the verification is guarded on the value's
+**length**, not on the key being defined.
+
+Comment lines are stripped before the audit because the task file's own header
+explains the `/etc/sysctl.conf` trap in prose, and a negative search over the
+raw text would always report a regression.
+
+Mutation-tested: dropping one `check_mode: false`, pointing `sysctl_file` at
+`/etc/sysctl.conf`, deleting the ratio-zero or two-page rule, dropping one
+probe's `LC_ALL=C` or `executable: /bin/bash`, removing the `when: not
+ansible_check_mode` gate, removing the `[ -r "$f" ]` read-back test, the
+`_vmwb_unread` gate or its empty-value filter, letting the read-back fail the
+play, removing the `writeback` tag, defaulting the cap on, and shipping
+`vm.dirty_ratio: 0` — each fails the relevant test.
+
+Two YAML traps hit while writing this file, both already known here: an
+`assert.that` entry containing `: ` inside a quoted regex parses as a
+**mapping** (quote the whole expression), and a **block scalar does not process
+string escapes**, so `join('\n')` under `>-` joins with a literal backslash-n
+and every multi-line needle silently stops matching — use a double-quoted
+scalar for that, or `regex_findall(..., multiline=True)`.
+
 ## When to run
 
 - Before merging any change to `roles/nvme_discovery/tasks/detect_boot_device.yml`
@@ -485,6 +591,9 @@ Test cases:
 - After any change to `roles/raid_setup/tasks/main.yml` (idempotency
   detection, `_device_remap`, or the per-element list rebuild pattern)
 - After any change to `scripts/run.sh` (locale-fallback chain)
+- After any change to `roles/perf_tuning/tasks/vm_writeback.yml` or to
+  `perf_vm_writeback` in `vars/main.yml` (the `*_bytes` / `*_ratio`
+  exclusivity guard — a mixed config's meaning depends on line order)
 - After any change to `roles/nfs_setup/tasks/main.yml` that references a
   variable registered inside a `when`-guarded block (skipped-result dicts
   lack `rc`/`stdout`/etc. — always guard with `is defined`)

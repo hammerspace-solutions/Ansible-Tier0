@@ -242,6 +242,26 @@
     msg: "NFS port configuration found: {{ nfs_port_config.stdout_lines }}"
   when: nfs_port_config.stdout | length > 0
 
+# exports(5) matches by entry TYPE, and line order only decides between
+# entries of the SAME type. So any IP-network entry listed after 0.0.0.0/0 is
+# never matched — the operator has configured something that does nothing.
+- name: Warn about client_subnets entries shadowed by 0.0.0.0/0
+  ansible.builtin.debug:
+    msg: >-
+      WARNING: client_subnets lists {{ _nfs_shadowed | join(', ') }} AFTER
+      0.0.0.0/0. exports(5) tries IP-network entries in line order and stops at
+      the first match, so these are never used. If they were meant to grant
+      different options (e.g. no_root_squash), move the hosts to
+      hammerspace_nodes / mover_nodes as single IPs instead.
+  vars:
+    _nfs_subnets: "{{ client_subnets | default([]) | map('string') | list }}"
+    _nfs_shadowed: >-
+      {{ (_nfs_subnets[(_nfs_subnets.index('0.0.0.0/0') + 1):]
+          if '0.0.0.0/0' in _nfs_subnets else [])
+         | select('search', '/') | list }}
+  when: _nfs_shadowed | length > 0
+  tags: [nfs, nfs-exports]
+
 - name: Backup existing exports file
   ansible.builtin.copy:
     src: /etc/exports
@@ -276,9 +296,31 @@
     enabled: true
     state: started
 
+# exportfs exits 0 after skipping an entry it could not parse or export
+# ("unknown keyword", "does not support NFS export", "duplicated export
+# entries") — it just prints to stderr and carries on. The path is then
+# silently unexported, or exported to fewer clients than configured.
 - name: Export NFS shares
   ansible.builtin.command: exportfs -ra
+  register: _nfs_exportfs
   changed_when: true
+  failed_when: false
+  tags: [nfs, nfs-exports]
+
+- name: Fail if exportfs rejected or warned about any entry
+  ansible.builtin.fail:
+    msg: |
+      exportfs -ra exited {{ _nfs_exportfs.rc }} with:
+        {{ _nfs_exportfs.stderr | trim | default('(no stderr)', true) | indent(2) }}
+
+      Every line of /etc/exports must export cleanly — an entry exportfs
+      rejects is silently missing from `showmount -e`. Fix the option or
+      path it names, or set nfs_exportfs_strict: false to accept warnings.
+  when:
+    - not ansible_check_mode
+    - _nfs_exportfs.rc is defined
+    - nfs_exportfs_strict | default(true) | bool
+    - (_nfs_exportfs.rc != 0) or ((_nfs_exportfs.stderr | default('') | trim) | length > 0)
   tags: [nfs, nfs-exports]
 
 - name: Verify NFS exports

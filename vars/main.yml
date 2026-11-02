@@ -678,6 +678,39 @@ hammerspace_apply_share_objectives: false
 #     objective: "availability-3-nines"
 #     applicability: "TRUE"
 
+# ----------------------------------------------------------------------------
+# Tier 0 placement (write to Tier 0 first)
+# ----------------------------------------------------------------------------
+# With only the default objectives a share spreads new files across EVERY
+# volume with free space — LSS/DSX-backed ones included. A write from a
+# Tier 0 node then lands on the DSX and is copied to Tier 0 later by the
+# mover. Joining the volumes to hammerspace_volume_group does not change
+# that on its own: an objective has to point at the group.
+#
+# Hammerspace auto-creates place-on-<group> for every volume group. Setting
+# this flag applies place-on-<hammerspace_volume_group> to each share in
+# hammerspace_shares, so first instances land on a Tier 0 volume in the
+# group. Requires hammerspace_volume_group. Nothing is created — a missing
+# objective or share is a hard failure.
+#
+# This selects the TIER, not the node: the Anvil balances across the group's
+# volumes. Node-local first-write needs per-node place-on-<node> objectives
+# on per-node directories (Tier 0 Deployment Guide, "Configure Tier 0 Nodes
+# to Write Local").
+hammerspace_tier0_place_on_group: false
+
+# Objective to apply. Default: "place-on-<hammerspace_volume_group>".
+# hammerspace_tier0_place_on_objective: "place-on-tier0-nvme"
+
+# Shares to apply it to. Default: every name in hammerspace_shares. Set this
+# to target shares that were created outside this playbook.
+# hammerspace_tier0_place_on_shares:
+#   - "checkpoints"
+
+# Applicability expression (Hammerspace objective syntax). Default: TRUE.
+# Example — only keep placing on Tier 0 for recently used data:
+# hammerspace_tier0_place_on_applicability: "LAST_USE_AGE<1*HOURS?TRUE"
+
 # ============================================================================
 # S3/Object Storage Integration (from Hammerspace Engineering)
 # ============================================================================
@@ -771,6 +804,11 @@ hammerspace_enable_prometheus: false
 nfs_threads: 128
 
 # NFS version settings per Hammerspace recommendations
+# Fail the run when `exportfs -ra` prints anything to stderr. exportfs exits 0
+# after SKIPPING an entry it cannot parse or export, so a warning is the only
+# sign that a path is silently unexported. Set false to accept warnings.
+nfs_exportfs_strict: true
+
 nfs_vers3: "y"
 nfs_vers4_0: "n"
 nfs_vers4_1: "n"
@@ -791,12 +829,26 @@ hammerspace_nodes:
 
 # Mover/DI node IPs - these need no_root_squash access
 # Include IPs for:
-#   - DSX nodes (if used - they include mover functionality)
-#   - Standalone Linux servers running DI RPM or container
-mover_nodes:
-  - "10.0.12.242"  # Example: DSX node or standalone DI server
+#   - DSX nodes (if used - they include mover functionality) — EVERY data-path
+#     IP the DSX uses to reach this node, not just its management IP
+#   - Standalone Linux servers running DI RPM or container (DI nodes in the
+#     di_nodes inventory group are added automatically — see di_auto_export)
+#
+# Empty by default. This used to ship with an example IP, which exported every
+# Tier 0 volume no_root_squash to whatever host holds that address at the site.
+mover_nodes: []
+#  - "10.0.12.242"  # Example: DSX node or standalone DI server
 
 # Client subnets (use root_squash for security)
+#
+# How exports(5) matches a client — this is NOT line order:
+#   1. single host (IP/FQDN)   2. IP network (a.b.c.d/n)   3. wildcard
+#   4. netgroup                5. anonymous "*"
+# A more specific TYPE always wins regardless of position on the line, so the
+# single IPs in hammerspace_nodes / mover_nodes beat 0.0.0.0/0 wherever they
+# sit. Line order only decides between entries of the SAME type: a second
+# subnet listed after 0.0.0.0/0 is never matched. So never rely on a subnet
+# here for no_root_squash — put hosts in hammerspace_nodes / mover_nodes.
 client_subnets:
   - "0.0.0.0/0"
 
@@ -859,6 +911,28 @@ perf_irq_pin_interfaces: []
 
 # ---- TCP / network sysctl ----
 perf_tcp_sysctl_enabled: true
+
+# ---- vm dirty-page writeback limits (NFS CLIENT ingest) ----
+# Everything above tunes the server side or the wire. This caps how much dirty
+# page cache a bulk writer on an NFS *mount* may build up before the kernel
+# throttles it. Without a cap the limit is vm.dirty_ratio = 20% of RAM, which
+# on a large-memory ingest host is hundreds of GB of dirty NFS pages — the
+# usual explanation for "azcopy / rsync is eating all the memory" (the pages
+# are charged to the page cache and NFS_Unstable, not to the process RSS).
+#
+# OFF by default: the knob is GLOBAL, so on a Tier 0 storage_server it also
+# throttles writeback to the local NVMe/MD array behind /hammerspace/hsvol*.
+# Enable it on dedicated ingest hosts, or on Tier 0 nodes that are themselves
+# the ingest client, after measuring.
+#   ansible-playbook site.yml --tags writeback -e perf_vm_writeback_enabled=true
+perf_vm_writeback_enabled: false
+
+# ONE form per limit — *_bytes or *_ratio, never both. Setting either form
+# zeroes the other in the kernel, so a file containing both means "whichever
+# line came last". roles/perf_tuning/tasks/vm_writeback.yml refuses a mix.
+perf_vm_writeback:
+  vm.dirty_background_bytes: 268435456   # 256 MB — background flush starts
+  vm.dirty_bytes: 1073741824             # 1 GB   — writer is throttled here
 
 # ============================================================================
 # Firewall Configuration

@@ -131,6 +131,26 @@
     hs_node_name: "{{ hammerspace_node_name | default(inventory_hostname) }}"
     hs_node_ip: "{{ hammerspace_node_ip | default(ansible_default_ipv4.address) }}"
 
+# The node AND its volumes are registered on this one address. On a GPU node
+# with a separate storage / RDMA network, the default-route NIC is usually the
+# management one — so every remote reader (DSX mover, other Tier 0 nodes)
+# reaches the volume over the management network, and the Tier 0 guide's
+# "IP per NIC" recommendation is unmet. Nothing here can pick the right NIC;
+# it can only make the choice visible.
+- name: Warn when the registration IP was auto-picked on a multi-NIC host
+  ansible.builtin.debug:
+    msg: >-
+      WARNING: {{ inventory_hostname }} has {{ ansible_all_ipv4_addresses | length }}
+      IPv4 addresses ({{ ansible_all_ipv4_addresses | join(', ') }}) and
+      hammerspace_node_ip is not set, so the node and its volumes will be
+      registered on the default-route address {{ hs_node_ip }}. If the data
+      path is on another NIC, set hammerspace_node_ip (and
+      hammerspace_additional_ips for the rest) or the DSX and other clients
+      will reach this node's volumes over the wrong network.
+  when:
+    - hammerspace_node_ip is not defined
+    - (ansible_all_ipv4_addresses | default([])) | length > 1
+
 # =============================================================================
 # Azure AZ Detection (Optional - must precede AZ mapping, which consumes
 # the azure_zone / azure_fault_domain facts this sets)
@@ -334,6 +354,16 @@
     - hammerspace_apply_share_objectives | default(false)
     - hammerspace_share_objectives is defined
     - hammerspace_share_objectives | length > 0
+
+# =============================================================================
+# Tier 0 placement: apply the volume group's place-on objective to the shares
+# (Optional - after shares). Without it the default objectives spread new
+# files across every volume, DSX-backed ones included.
+# =============================================================================
+
+- name: Apply the volume group place-on objective to the Tier 0 shares
+  ansible.builtin.include_tasks: tier0_place_on_group.yml
+  when: hammerspace_tier0_place_on_group | default(false) | bool
 
 # =============================================================================
 # Summary
