@@ -156,7 +156,7 @@
           PUT {{ hs_api_url }}/volume-groups/{{ _vg_add_uuid }}
 
           The API said:
-            {{ (vg_update_result.stdout_lines | default([]))[:-1] | join('\n  ') | trim | regex_replace('(?i)authorization:\s*Basic\s+[A-Za-z0-9+/=]+', 'authorization: Basic <redacted>') | default('(empty response body)', true) }}
+            {{ (vg_update_result.stdout_lines | default([]))[:-1] | join('\n  ') | trim | regex_replace('(?i)Basic\s+[A-Za-z0-9+/=]{8,}', 'Basic <redacted>') | default('(empty response body)', true) }}
 
           The volume itself is registered; only its group membership failed.
       when:
