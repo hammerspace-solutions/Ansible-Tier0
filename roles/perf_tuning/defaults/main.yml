@@ -47,3 +47,28 @@ perf_tcp_sysctl:
   net.ipv4.tcp_wmem: "4096 65536 268435456"
   net.core.netdev_max_backlog: 250000
   net.ipv4.tcp_mtu_probing: 1
+
+# ---- vm dirty-page writeback limits (NFS *client* ingest BKM) ----
+# Caps how much dirty page cache a bulk NFS writer (azcopy, rsync, cp, dd)
+# may accumulate before the kernel throttles it. With no explicit cap the
+# limit is vm.dirty_ratio = 20% of available memory; on a large-memory node
+# that is hundreds of GB of dirty NFS pages, which looks from the outside
+# like the ingest tool "using crazy amounts of memory".
+#
+# OFF by default. The knob is GLOBAL, not per-mount: it also throttles
+# writeback to the local NVMe / MD array backing /hammerspace/hsvol*, so a cap
+# sized for an ingest client can slow a Tier 0 storage node's own writes.
+# Enable it on hosts whose job is NFS ingest.
+perf_vm_writeback_enabled: false
+
+# Only ONE form per limit — *_bytes or *_ratio, never both. vm_writeback.yml
+# refuses a mix, because writing either form zeroes the other and the result
+# then depends on line order. Prefer *_bytes: it does not scale with RAM.
+perf_vm_writeback:
+  # Start background flushing at 256 MB of dirty pages.
+  vm.dirty_background_bytes: 268435456
+  # Throttle the writing process at 1 GB of dirty pages.
+  vm.dirty_bytes: 1073741824
+
+# Filename under /etc/sysctl.d/. Applied in lexical order by `sysctl --system`.
+perf_vm_writeback_sysctl_filename: 99-hammerspace-vm-writeback.conf
