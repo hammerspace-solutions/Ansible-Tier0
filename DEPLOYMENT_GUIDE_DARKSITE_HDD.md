@@ -2,6 +2,17 @@
 
 Step-by-step guide for deploying Hammerspace Tier 0 storage on air-gapped (darksite) bare-metal servers with HDD or hardware RAID storage.
 
+**Who this is for:** operators of on-premises servers with no internet
+access, or servers whose data disks are SATA/SAS or behind a hardware RAID
+controller rather than NVMe.
+
+**Time:** an hour to prepare the offline bundle on a connected machine, then
+about 30 minutes on site for the first node.
+
+**What you will end up with:** each server's data disks configured as Tier 0
+volumes (software or hardware RAID), exported over NFS and registered in
+Hammerspace — with no package downloads on site.
+
 ---
 
 ## Table of Contents
@@ -388,7 +399,7 @@ scsi_exclude_models: []
 # ============================================================================
 hammerspace_api_host: "10.0.10.15"         # Anvil management IP
 hammerspace_api_user: "admin"
-hammerspace_api_password: "your-password"
+hammerspace_api_password: "{{ vault_hammerspace_api_password }}"   # set in vars/vault.yml
 hammerspace_api_validate_certs: false
 
 # ============================================================================
@@ -420,6 +431,18 @@ skip_confirmation: false
 force_raid_recreate: false
 force_fs_recreate: false
 fail_on_drives_in_use: false   # Set false for re-runs
+```
+
+**The password** goes in `vars/vault.yml`, which you then encrypt:
+
+```yaml
+vault_hammerspace_api_password: "your-password"
+```
+
+```bash
+ansible-vault encrypt vars/vault.yml
+# add --ask-vault-pass (or --vault-password-file ~/.vault_pass) to every
+# ansible-playbook command from here on
 ```
 
 ---
@@ -460,7 +483,7 @@ mount_base_path: /hammerspace
 # ============================================================================
 hammerspace_api_host: "10.0.10.15"
 hammerspace_api_user: "admin"
-hammerspace_api_password: "your-password"
+hammerspace_api_password: "{{ vault_hammerspace_api_password }}"   # set in vars/vault.yml
 hammerspace_api_validate_certs: false
 
 # ============================================================================
@@ -669,7 +692,7 @@ ansible-playbook site.yml --tags "discovery,precheck" --ask-become-pass -K
 ```bash
 # Deploy to all storage servers
 ansible-playbook site.yml
-```
+
 # If using a non-root user with sudo, pass the become password:
 ansible-playbook site.yml --ask-become-pass -K
 ```
@@ -1159,8 +1182,8 @@ mount_base_path: /hammerspace
 
 ## Support
 
-For issues or questions:
-- Check the main [README.md](README.md) for detailed configuration options
-- Review `vars/main.yml` for all available settings
-- See [DEPLOYMENT_GUIDE.md](DEPLOYMENT_GUIDE.md) for cloud/OCI deployments
-- Contact Hammerspace support for cluster-related issues
+- [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md) — platform-independent symptoms, causes and fixes
+- [docs/STORAGE_CONFIGURATION.md](docs/STORAGE_CONFIGURATION.md) — drive selection, hardware RAID, existing filesystems
+- [VARIABLE_REFERENCE.md](VARIABLE_REFERENCE.md) — every setting with its default
+- [DEPLOYMENT_GUIDE.md](DEPLOYMENT_GUIDE.md) — the cloud (OCI) walkthrough
+- Hammerspace support for cluster-side issues — attach the log from `~/logs/ansible-<timestamp>.log`

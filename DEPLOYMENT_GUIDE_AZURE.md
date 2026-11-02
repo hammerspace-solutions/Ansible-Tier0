@@ -3,6 +3,16 @@
 Step-by-step guide for deploying Hammerspace Tier 0 storage on Microsoft Azure
 Virtual Machines.
 
+**Who this is for:** the person doing the first Tier 0 deployment on Azure,
+and anyone adding VMs later. No prior Ansible experience is assumed.
+
+**Time:** about an hour for the control-machine setup and first deployment;
+5–10 minutes per VM after that.
+
+**What you will end up with:** every VM matching your filter running Tier 0
+storage on its local NVMe, registered in Hammerspace, with the availability
+zone (or fault domain) recorded on each node and volume.
+
 > **Companion guides:** [DEPLOYMENT_GUIDE.md](DEPLOYMENT_GUIDE.md) (OCI) is the
 > reference walkthrough. This guide mirrors it, replacing sections 3 (auth), 4
 > (inventory) and 9 (AZ) with Azure equivalents and adding the Azure-only disk
@@ -583,7 +593,7 @@ goes. Read it before the first run.
 | **Lsv3 / Lasv3** (storage optimized) | Local NVMe | `nvme` |
 | **Lsv2** (storage optimized, older) | Local NVMe | `nvme` |
 | **ND / NC** (GPU) | Local NVMe on most sizes | `nvme` |
-| **Any SKU + attached Premium SSD v2 / Ultra Disk** | Managed data disks as `/dev/sd*` | `ssd` |
+| **Any SKU + attached Premium SSD v2 / Ultra Disk** | Managed data disks as `/dev/sd*` | `scsi` (not `ssd` — Azure reports managed disks as rotational, so `ssd` finds nothing) |
 
 The storage-optimized L-family is the natural fit for Tier 0: local NVMe with
 no per-IO billing and no network hop. Managed disks work but are billed on
@@ -606,7 +616,7 @@ Read the output and decide:
 - Local NVMe drives shown as `nvme0n1`, `nvme1n1`, … with no mountpoint →
   `storage_type: nvme`
 - Attached data disks shown as `sdc`, `sdd`, … with no mountpoint →
-  `storage_type: ssd`
+  `storage_type: scsi`
 - The disk holding `/` → protected automatically, never touched
 - A disk mounted at `/mnt` → the resource disk, see next section
 
@@ -618,10 +628,9 @@ Agent. It is **local, unbacked and wiped on deallocate/redeploy**. Putting it
 in a Tier 0 RAID set produces an array that silently loses a member the first
 time the VM is stopped.
 
-Disk discovery protects it automatically: `/mnt` and `/mnt/resource` are in the
-SYSTEM-mountpoint allow-list in
-`roles/nvme_discovery/tasks/detect_boot_device.yml`, so the resource disk lands
-in `_protected_disks` and is excluded from discovery.
+Disk discovery protects it automatically: `/mnt` and `/mnt/resource` are
+treated as system mountpoints, so the resource disk is classified as protected
+and excluded from discovery.
 
 **Verify this before the first real run** — one dry run, and read the
 classification output:
@@ -1015,8 +1024,8 @@ Zone wins when both are present.
 
 ### 10.2 Full AZ Detection Priority
 
-Implemented once as `_cloud_az_detected` in `vars/main.yml`, consumed by node
-labelling, volume naming and the instance report:
+The same detection is used for node labelling, volume naming and the instance
+report:
 
 1. `hammerspace_node_az` — explicit per-host override
 2. `oci_fault_domain` — OCI only
@@ -1080,8 +1089,7 @@ this reason.
 | Symptom | Cause | Fix |
 |---------|-------|-----|
 | Every volume is `AZ1:` | Non-zonal VMs, IMDS disabled | Set `hammerspace_azure_imds_az: true` |
-| Volume named `AZ0:...` | Fault domain used without `+1` | Should be impossible — run `tests/integration/test_azure_az_map.yml` |
-| Volume named `AZ:...` (no number) | Empty `azure_zone` treated as present | Should be impossible — run the same test |
+| Volume named `AZ0:...` or `AZ:...` (no number) | Detection bug | Should not happen on a current version — update, and report it to Hammerspace support with the volume name |
 | Volume has no AZ prefix at all | `hammerspace_volume_az_prefix_enabled` is false, or mode is not `auto` | Check both in `vars/main.yml` |
 | AZ correct in logs, wrong in Hammerspace | `hammerspace_apply_az_labels` is false | Set it true to push labels via the API |
 
@@ -1310,9 +1318,6 @@ ansible-playbook preflight_check.yml -i inventory.azure.yml \
     -e hammerspace_api_password='...'
 ```
 
-Regression test: `tests/integration/test_vault_loading.yml`, which audits every
-playbook in the repo for this.
-
 See [DEPLOYMENT_GUIDE.md § 12](DEPLOYMENT_GUIDE.md#12-troubleshooting) for the
 cloud-agnostic failures — locale errors, `Device or resource busy` on re-run,
 boot-drive safety gate, `repo_root` path errors, Hammerspace API preflight
@@ -1320,17 +1325,13 @@ failures.
 
 ### Azure AZ Issues
 
-See [section 10.5](#105-troubleshooting-az-mapping).
-
-To confirm the AZ logic itself is sound before blaming the cloud:
+See [section 10.5](#105-troubleshooting-az-mapping). The quickest check is to
+compare what Azure reports for a VM with what ended up in Hammerspace:
 
 ```bash
-ansible-playbook tests/integration/test_azure_az_map.yml -i localhost, -c local
+ansible -i inventory.azure.yml storage_servers -m shell \
+    -a 'curl -s -H Metadata:true "http://169.254.169.254/metadata/instance/compute?api-version=2021-02-01" | jq "{zone, platformFaultDomain}"'
 ```
-
-Nine cases covering both bases, non-zonal VMs, precedence and failed IMDS
-responses. If these pass, the mapping code is correct and the problem is
-configuration or Azure-side placement.
 
 ---
 
@@ -1391,7 +1392,6 @@ Azure VMs through the portal or `az` CLI if needed.
 | Verify NFS | `ansible-playbook verify_nfs.yml -i inventory.azure.yml` |
 | Verify resource disk survived | `ansible -i inventory.azure.yml storage_servers -m shell -a 'findmnt -n -o TARGET,SOURCE /mnt; cat /proc/mdstat' -b` |
 | Check IMDS placement | `ansible -i inventory.azure.yml storage_servers -m shell -a 'curl -s -H Metadata:true "http://169.254.169.254/metadata/instance/compute?api-version=2021-02-01"' ` |
-| Test AZ mapping logic | `ansible-playbook tests/integration/test_azure_az_map.yml -i localhost, -c local` |
 | Read instance report | `column -s, -t instance_report.csv` |
 | Reset Tier 0 host | `ansible-playbook reset-tier0-host.yml -i inventory.azure.yml --limit "tier0-node-05" -e reset_confirm=true` |
 | Cleanup (dry run) | `python3 cleanup_instance_nodes.py --host <IP> --user admin --password-file ~/.hs_password --contains "tier0" --dry-run` |
@@ -1400,8 +1400,9 @@ Azure VMs through the portal or `az` CLI if needed.
 
 ## Support
 
-- [README.md](README.md) — full configuration reference, Azure inventory setup in "Configure Inventory → Option E"
+- [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md) — platform-independent symptoms, causes and fixes
+- [docs/INVENTORY_SETUP.md](docs/INVENTORY_SETUP.md#azure-dynamic-inventory) — Azure inventory reference
 - [VARIABLE_REFERENCE.md](VARIABLE_REFERENCE.md) — every variable, including the Azure AZ chain
-- [DEPLOYMENT_GUIDE.md](DEPLOYMENT_GUIDE.md) — OCI guide; DI, decommissioning and cloud-agnostic troubleshooting
-- [tests/integration/README.md](tests/integration/README.md) — what the regression tests cover
-- Contact Hammerspace support for cluster-related issues
+- [DEPLOYMENT_GUIDE.md](DEPLOYMENT_GUIDE.md) — the OCI guide; DI and decommissioning sections apply here too
+- [DEPLOYMENT_GUIDE_AZURE_EXISTING_MOUNT.md](DEPLOYMENT_GUIDE_AZURE_EXISTING_MOUNT.md) — VMs whose NVMe is already formatted and mounted
+- Hammerspace support for cluster-side issues — attach the log from `~/logs/ansible-<timestamp>.log`

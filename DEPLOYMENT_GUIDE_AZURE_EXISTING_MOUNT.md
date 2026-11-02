@@ -3,6 +3,10 @@
 Register Azure nodes whose local NVMe array is **already built and mounted**, and
 unregister them again without touching the data.
 
+**Who this is for:** operators of CycleCloud (or similar) clusters where the
+VM image already assembles and mounts the local NVMe, typically at `/nvme`.
+**Time:** 15 minutes for the first node once the inventory works.
+
 Written for CycleCloud HB/L-series nodes where Azure has already assembled
 `/dev/md0` and mounted it at `/nvme`. In this mode the playbook never runs
 discovery, `mdadm` or `mkfs` — it creates one export directory inside the
@@ -95,20 +99,12 @@ no vault access.
 
 #### When the Key Vault lookup fails
 
-The lookup carries `no_log: true`, because its result holds the plaintext admin
-password and `scripts/run.sh` writes every run to a log file. The playbook
-therefore never lets that task fail the play — it reports the Azure error in a
-following task instead. If you see only this:
-
-```
-fatal: [10.0.0.5 -> localhost]: FAILED! =>
-  censored: 'the output has been hidden due to the fact that
-  ''no_log: true'' was specified for this result'
-```
-
-…you are on a build from before 2026-09-03. Pull the current
-`roles/hammerspace_integration/tasks/keyvault_password.yml` and re-run; the
-real error is printed.
+The lookup itself never prints anything — its result would contain the
+plaintext admin password, and every run is written to a log file — so the
+Azure error is reported by the task that follows it. If all you see is
+`censored: 'the output has been hidden due to the fact that no_log: true was
+specified'`, you are running an old version of the playbook: update and re-run,
+and the real error will be printed.
 
 Fastest way to split authentication from authorization — run it on the
 **scheduler**, which is where the lookup executes:
@@ -325,21 +321,3 @@ To bring a node back afterwards, re-run `site.yml`.
 
 Every run is logged under `~/logs/` by `scripts/run.sh`. Send that file along
 with the failing task when raising an issue.
-
----
-
-## Regression tests
-
-Existing-mount mode, volume group membership, Key Vault retrieval and the
-decommission playbook are all covered under `tests/integration/`:
-
-| Test | Covers |
-|---|---|
-| `test_existing_mounts.yml` | `mp` → `mountpoint=`, path normalisation, system-mountpoint refusal, destructive roles gated off |
-| `test_volume_group_join.yml` | append-only membership, idempotence, `run_once` union write |
-| `test_keyvault_password.yml` | opt-in default, `no_log` coverage, hook present in every vault-loading playbook |
-| `test_decommission_tier0.yml` | no data-destructive operation, ordering, exact `--node` targeting |
-
-```bash
-./tests/run_all.sh
-```

@@ -2,6 +2,18 @@
 
 Automated Hammerspace Tier 0 & DI deployment on OCI GPU instances. Zero SSH, zero human intervention — instances self-provision on launch.
 
+**Who this is for:** OCI customers whose GPU fleet grows and shrinks
+automatically (node pools, autoscaling, frequent replacement) and who do not
+want to run a playbook every time.
+**What you need:** an OCI tenancy where you can create a Vault secret, a
+Function and an Event rule; Terraform and Docker (or podman) on your
+workstation; a working manual deployment first — this guide automates
+[DEPLOYMENT_GUIDE.md](DEPLOYMENT_GUIDE.md), it does not replace it.
+**Time:** about an hour to set up; then nothing.
+
+For the semi-automatic version — you run one command, the instances do the
+rest, still no SSH — see [docs/ZERO_SSH_DEPLOYMENT.md](docs/ZERO_SSH_DEPLOYMENT.md).
+
 ---
 
 ## Table of Contents

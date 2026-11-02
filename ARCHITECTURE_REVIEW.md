@@ -1,5 +1,8 @@
 # Architecture Review — Hammerspace Tier 0 Ansible Automation
 
+> **Audience: Hammerspace engineering.** This is an internal design review of
+> the automation. If you are deploying Tier 0, start at [README.md](README.md).
+
 **Review Date:** March 26, 2026
 **Codebase:** ~6,080 lines YAML (33 task files, 7 roles) + ~2,550 lines Python (5 scripts) + ~1,260 lines playbooks = **~16,600 lines total**
 **Verdict:** Production-ready for Tier 0 / LSS deployments across OCI, AWS, GCP, and on-prem

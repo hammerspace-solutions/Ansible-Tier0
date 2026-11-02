@@ -1,5 +1,8 @@
 # Test Scenarios — Ansible-Tier0
 
+> **Audience: Hammerspace engineering and QA.** Manual test plan for the
+> automation itself. If you are deploying Tier 0, start at [README.md](README.md).
+
 Comprehensive test plan covering Tier 0 storage, DI deployment, OCI Run Command, and event-driven auto-provisioning.
 
 ---

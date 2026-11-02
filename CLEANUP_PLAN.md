@@ -1,8 +1,12 @@
 # Production Readiness Checklist — Hammerspace Tier 0 Ansible
 
-**Date:** March 26, 2026
-**Audience:** Customers deploying Hammerspace Tier 0 / LSS storage
-**Purpose:** Ensure your deployment is secure, reliable, and maintainable
+**Who this is for:** the team that owns a Tier 0 deployment once it is
+working — before it carries production data, and on an ongoing basis.
+**Time:** about an hour for sections 1–2 on the first pass; the rest is
+scheduled work.
+
+Work through the sections in order. Each item says why it matters, what to
+run, and what you should see.
 
 ---
 
@@ -132,8 +136,12 @@ hammerspace_nodes:
   - "10.0.10.15"       # Anvil cluster management IP — verify this is correct
 
 mover_nodes:
-  - "10.0.12.242"      # DSX/DI nodes — verify all IPs
+  - "10.0.12.20"       # DSX / DI nodes — every data-path IP they use to reach Tier 0
 ```
+
+DI nodes listed in the `di_nodes` inventory group are added to the exports
+automatically; `mover_nodes` is for DSX nodes and movers deployed some other
+way.
 
 ### 1.5 Review Firewall Rules
 
@@ -196,7 +204,7 @@ The playbook deploys systemd guard services that prevent accidental unmounts and
 systemctl status hammerspace-guards.target
 
 # Check individual guard services (one per mount point)
-systemctl list-units 'hammerspace-guard-*' --all
+systemctl list-units 'hammerspace-*-guard.service' --all
 
 # Check remount watchdog timer
 systemctl status hammerspace-remount.timer
@@ -231,7 +239,7 @@ sudo mdadm --detail /dev/md1
 sudo mdadm --examine --scan
 ```
 
-**Healthy output:** All arrays show `[UU]` (both members up). No `[_U]` or `[U_]`.
+**Healthy output:** every array is `active` and its status string shows only `U`s (for example `[UUUU]`). An `_` means a missing member.
 
 **If degraded:**
 1. Identify failed drive from `mdadm --detail`
@@ -532,20 +540,24 @@ python3 set_availability_drop.py --host <ANVIL_IP> --user admin \
 ### 5.4 Removing Nodes
 
 ```bash
-# 1. Disable availability-drop
-python3 set_availability_drop.py --host <ANVIL_IP> --user admin \
-  --password-file ~/.hs_password --node <NODE_NAME> --disable
+# 1. Remove from Hammerspace (preview first) — data on the node is untouched
+ansible-playbook decommission_tier0.yml --limit <NODE_NAME> --check
+ansible-playbook decommission_tier0.yml --limit <NODE_NAME> -e decommission_confirm=true
 
-# 2. Remove from Hammerspace (dry run first)
+#    ...or, if the node is already gone, by name from the API:
 python3 cleanup_instance_nodes.py --host <ANVIL_IP> --user admin \
   --password-file ~/.hs_password --node <NODE_NAME> --dry-run
-
-# 3. Execute removal
 python3 cleanup_instance_nodes.py --host <ANVIL_IP> --user admin \
   --password-file ~/.hs_password --node <NODE_NAME>
 
-# 4. Remove from inventory file
+# 2. Remove from the inventory file
+
+# 3. Optional — wipe the node for reuse (DESTROYS the data on it)
+ansible-playbook reset-tier0-host.yml --limit <NODE_NAME> -e reset_confirm=true
 ```
+
+Hammerspace evacuates the node's data as part of the volume deletion; make
+sure the remaining nodes have room for it first (see the runbook).
 
 ### 5.5 Updating Ansible Configuration
 
@@ -603,8 +615,8 @@ Run through this checklist after initial deployment and after any major change:
 
 | Resource | Location |
 |----------|----------|
-| Deployment walkthrough | [DEPLOYMENT_GUIDE.md](DEPLOYMENT_GUIDE.md) |
-| Air-gapped / HDD deployment | [DEPLOYMENT_GUIDE_DARKSITE_HDD.md](DEPLOYMENT_GUIDE_DARKSITE_HDD.md) |
+| Deployment walkthroughs | [DEPLOYMENT_GUIDE.md](DEPLOYMENT_GUIDE.md) (OCI), [DEPLOYMENT_GUIDE_AZURE.md](DEPLOYMENT_GUIDE_AZURE.md), [DEPLOYMENT_GUIDE_DARKSITE_HDD.md](DEPLOYMENT_GUIDE_DARKSITE_HDD.md) |
 | RMA and rack operations | [RACK_OPERATIONS_RUNBOOK.md](RACK_OPERATIONS_RUNBOOK.md) |
+| Every operator playbook and script | [docs/OPERATOR_SCRIPTS.md](docs/OPERATOR_SCRIPTS.md) |
+| When something breaks | [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md) |
 | All variables and defaults | [VARIABLE_REFERENCE.md](VARIABLE_REFERENCE.md) |
-| Architecture and design | [ARCHITECTURE_REVIEW.md](ARCHITECTURE_REVIEW.md) |

@@ -1,8 +1,14 @@
 # Rack Operations Runbook — Hammerspace Tier 0
 
-**Version:** 1.0
-**Audience:** Customer Operations Teams
-**Prerequisite:** Hammerspace Fundamentals Training, Ansible basics
+**Who this is for:** the operations team that keeps a Tier 0 cluster running —
+planned maintenance, drive and node replacement, permanent removal, and
+emergencies.
+**What you need:** the Anvil IP and admin password (in `~/.hs_password`), SSH
+to the nodes for the re-provisioning steps, and the Tier 0 Ansible repository
+on your workstation.
+**Prerequisite knowledge:** Hammerspace fundamentals; basic Ansible.
+
+Every procedure has a preview (`--check` / `--dry-run`) step. Use it.
 
 ---
 
@@ -108,6 +114,10 @@ Options:
 |----------|---------|
 | `site.yml` | Full provisioning (OCI / general) |
 | `site-onprem-nvme.yml` | On-prem NVMe provisioning (no firewall) |
+| `decommission_tier0.yml` | Remove nodes from Hammerspace by inventory name; data on the node untouched |
+| `reset-tier0-host.yml` | Wipe a node back to bare metal (destroys its data) |
+
+All operator tools are described in [docs/OPERATOR_SCRIPTS.md](docs/OPERATOR_SCRIPTS.md).
 
 ---
 
@@ -341,6 +351,14 @@ anvil> task-list
 **Use when:** Permanently retiring a node from the Hammerspace cluster.
 
 This is the same workflow as [Volume Decommission](#5-volume-decommission-permanent-removal) — the `cleanup_instance_nodes.py` script handles both volumes and node removal in sequence.
+
+If the nodes are still in your Ansible inventory, `decommission_tier0.yml`
+does the same thing selected by inventory name:
+
+```bash
+ansible-playbook decommission_tier0.yml -i inventory.yml --limit 'cri22cn409,cri22cn410' --check
+ansible-playbook decommission_tier0.yml -i inventory.yml --limit 'cri22cn409,cri22cn410' -e decommission_confirm=true
+```
 
 ### Complete Workflow
 

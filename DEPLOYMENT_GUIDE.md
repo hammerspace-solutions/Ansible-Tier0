@@ -2,13 +2,26 @@
 
 Step-by-step guide for deploying Hammerspace Tier 0 storage on Oracle Cloud Infrastructure (OCI) GPU instances.
 
-> **Other clouds:** this guide is OCI-specific.
-> **Azure has its own end-to-end guide:**
-> [DEPLOYMENT_GUIDE_AZURE.md](DEPLOYMENT_GUIDE_AZURE.md).
-> AWS and GCP follow this guide's flow — only sections 3 (authentication) and 4
-> (inventory) differ. See "Configure Inventory → Option C/D" in
-> [README.md](README.md) for the per-provider setup, then rejoin this guide at
-> section 5 (Configure Variables).
+**Who this is for:** the person doing the first deployment on OCI, and anyone
+adding instances later. No prior Ansible experience is assumed — every command
+is given in full.
+
+**Time:** about an hour for the control-machine setup and first deployment;
+5–10 minutes per instance after that.
+
+**What you will end up with:** every GPU instance in your compartment running
+Tier 0 storage, registered in Hammerspace, with availability zones assigned
+from the GPU fabric topology.
+
+> **Other platforms.**
+> **Azure** has its own guide: [DEPLOYMENT_GUIDE_AZURE.md](DEPLOYMENT_GUIDE_AZURE.md).
+> **AWS and GCP** follow this guide; only sections 3 (authentication) and 4
+> (inventory) differ — use the AWS or GCP section of
+> [docs/INVENTORY_SETUP.md](docs/INVENTORY_SETUP.md) for those two, then rejoin
+> at section 5.
+> **On-premises** servers use a static inventory
+> ([docs/INVENTORY_SETUP.md](docs/INVENTORY_SETUP.md#static-inventory)) and skip
+> section 3.
 
 ---
 
@@ -43,14 +56,11 @@ Before starting, ensure you have:
 | Network | Instances can reach Hammerspace Anvil on port 8443 |
 | Locale (control host) | UTF-8 locale required. Non-English systems (e.g. Korean ko_KR) must `export LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8` before running Ansible, or use `./scripts/run.sh` which sets it automatically. |
 
-> **Single-source the Anvil IP.** Set `hammerspace_api_host` once in `vars/main.yml`.
-> `hammerspace_nodes`, `network_test_targets`, and `hammerspace_cluster_mgmt_ip`
-> default to references back to it — no need to repeat the IP in three places.
-
-> **API preflight runs first.** The playbook tests reachability + credentials at
-> the Hammerspace API in the first 30 seconds and fails fast with a specific
-> message (401, 403, TCP failure, etc.) if anything is wrong, before any
-> RAID/filesystem/NFS work.
+> **Two things that save time later.** You only set the Anvil IP once
+> (`hammerspace_api_host`); the NFS export list, the network test and the DI
+> settings all follow it. And the playbook tests the Anvil connection and
+> credentials in its first 30 seconds, so a wrong password fails immediately
+> rather than after the RAID build.
 
 ---
 
@@ -85,8 +95,8 @@ pip3 install oci
 ### 2.3 Clone the Repository
 
 ```bash
-git clone <repository-url> ansible-tier0
-cd ansible-tier0
+git clone https://github.com/hammerspace-solutions/Ansible-Tier0.git
+cd Ansible-Tier0
 
 # Pull large files (DI RPMs in payload/) — requires git-lfs
 # Install git-lfs: brew install git-lfs (macOS) or apt install git-lfs (Linux)
@@ -157,11 +167,12 @@ inventory = inventory.oci.yml
 private_key_file = /path/to/your/ssh/key    # <-- Path to your SSH private key
 ```
 
-On another cloud, point `inventory` at that provider's file instead —
-`inventory.aws.yml` or `inventory.gcp.yml`. (Note `inventory.az.yml` is a
-**static availability-zone-grouped** inventory, not an Azure one.) For Azure,
-follow [DEPLOYMENT_GUIDE_AZURE.md](DEPLOYMENT_GUIDE_AZURE.md) instead — the
-remote user, disk layout and AZ handling all differ.
+On AWS or GCP, point `inventory` at `inventory.aws.yml` or `inventory.gcp.yml`
+instead and configure it as described in
+[docs/INVENTORY_SETUP.md](docs/INVENTORY_SETUP.md). (`inventory.az.yml` is a
+static inventory grouped by availability zone — not Azure.) For Azure, follow
+[DEPLOYMENT_GUIDE_AZURE.md](DEPLOYMENT_GUIDE_AZURE.md) — the remote user, disk
+layout and AZ handling all differ.
 
 **Important:** The SSH public key must be configured on all GPU instances. Ensure:
 
@@ -255,59 +266,92 @@ instance20260127011851 | SUCCESS => {
 
 ## 5. Configure Variables
 
-### 5.1 Edit vars/main.yml
+All site settings live in one file, `vars/main.yml`; the password lives in
+`vars/vault.yml`. Only the values below need attention for a first
+deployment — everything else has a working default.
 
-Update the following sections in `vars/main.yml`:
+### 5.1 Hammerspace connection (required)
 
-#### Hammerspace API Configuration (Required)
+In `vars/main.yml`:
 
 ```yaml
-# Anvil management IP
-hammerspace_api_host: "10.241.0.105"    # <-- Update to your Anvil IP
+# Anvil management IP — set once; the NFS export list, network test and DI
+# settings all follow it
+hammerspace_api_host: "10.241.0.105"    # <-- your Anvil IP
 
-# API credentials
-hammerspace_api_user: "admin"
-hammerspace_api_password: "your-password"    # <-- Update password
+hammerspace_api_user: "admin"            # must have the admin role
+hammerspace_api_password: "{{ vault_hammerspace_api_password }}"   # leave as is
 
-# Skip SSL validation (for self-signed certs)
+# Set true once the Anvil has a certificate your control machine trusts
 hammerspace_api_validate_certs: false
 ```
 
-#### NFS Export Configuration
+In `vars/vault.yml`, set the password and encrypt the file:
 
 ```yaml
-# Hammerspace node IPs (require no_root_squash)
+vault_hammerspace_api_password: "your-password"
+```
+
+```bash
+ansible-vault encrypt vars/vault.yml
+# From now on add --ask-vault-pass (or --vault-password-file ~/.vault_pass)
+# to every ansible-playbook command in this guide.
+```
+
+### 5.2 Who may access the exports
+
+```yaml
+# Hammerspace nodes — full (no_root_squash) access.
+# The Anvil is included automatically; add other Anvil or DSX IPs here.
 hammerspace_nodes:
-  - "10.241.0.105"    # <-- Anvil cluster IP
+  - "{{ hammerspace_api_host }}"
+  # - "10.241.0.106"
 
-mover_nodes:
-  - "10.241.0.10"     # <-- DI/Mover node IPs
-  - "10.241.0.11"
+# Mover / DI servers — full access. Every data-path IP a DSX uses to reach
+# the node. (Nodes in the di_nodes inventory group are added automatically.)
+mover_nodes: []
 
-# Client subnets (use root_squash)
+# Everyone else — root_squash. Narrow this for production.
 client_subnets:
   - "10.200.104.0/24"
   - "10.200.105.0/24"
 ```
 
-#### Storage Configuration (Usually No Changes Needed)
+### 5.3 Storage (normally no changes)
 
 ```yaml
-# Dynamic NVMe discovery (recommended)
-use_dynamic_discovery: true
-
-# RAID level (0 for Tier 0)
-raid_level: 0
-
-# Mount point base path
-mount_base_path: /hammerspace
+use_dynamic_discovery: true      # find drives and group them by NUMA node
+storage_type: "nvme"
+raid_level: 0                    # Tier 0 = RAID 0
+mount_base_path: /hammerspace    # volumes become /hammerspace/hsvol0, hsvol1, ...
 ```
+
+To exclude a drive, use hardware RAID, or reuse an existing filesystem, see
+[docs/STORAGE_CONFIGURATION.md](docs/STORAGE_CONFIGURATION.md).
+
+### 5.4 Optional: place new files on Tier 0 first
+
+If you have a volume group for Tier 0 in Hammerspace, tell the playbook to
+join it and apply its placement objective to your shares — otherwise new files
+are spread across every volume, DSX-backed ones included:
+
+```yaml
+hammerspace_volume_group: "tier0-nvme"      # must already exist
+hammerspace_tier0_place_on_group: true
+```
+
+Details: [docs/HAMMERSPACE_INTEGRATION.md](docs/HAMMERSPACE_INTEGRATION.md#making-new-files-land-on-tier-0).
 
 ---
 
 ## 6. Run Preflight Check
 
-The preflight check compares your OCI inventory with Hammerspace to identify new instances that need deployment.
+The preflight check asks Hammerspace which of your OCI instances are already
+registered, and writes down the ones that are not. Running it first means a
+second deployment only touches new instances.
+
+> From here on, add `--ask-vault-pass` (or `--vault-password-file`) to every
+> `ansible-playbook` command if you encrypted `vars/vault.yml`.
 
 ### 6.1 Run Preflight Check
 
@@ -352,9 +396,17 @@ ansible-playbook site.yml --limit "instance20260201011850,instance20260201011851
 | `.new_instances_limit` | List of new instance names for `--limit` |
 | `preflight_report.txt` | Full report saved to disk |
 
+**If it reports zero new instances** but you expect some: check that the
+instances appear in `ansible-inventory -i inventory.oci.yml --graph` (section
+4.3), and that their names do not already exist in Hammerspace (`anvil>
+node-list`).
+
 ---
 
 ## 7. Deploy to New Instances
+
+Pick one of the four options. Option A is the easiest; Option B shows what it
+does under the hood.
 
 ### Option A: Using the Deployment Script (Recommended)
 
@@ -420,16 +472,41 @@ The playbook will execute these roles in order:
 | 3 | `raid_setup` | Create mdadm RAID arrays |
 | 4 | `filesystem_setup` | Create XFS filesystems |
 | 5 | `nfs_setup` | Configure NFS server and exports |
-| 6 | `perf_tuning` | Apply Hammerspace BKMs (sunrpc slots, NFSD direct I/O, read-ahead, NIC IRQ pinning, TCP sysctl) |
+| 6 | `perf_tuning` | Apply Hammerspace BKMs (sunrpc slots, NFSD direct I/O, read-ahead, NIC IRQ pinning, TCP sysctl; opt-in NFS-client writeback caps) |
 | 7 | `firewall_setup` | Open NFS and RDMA ports |
 | 8 | `hammerspace_integration` | Register node and volumes via API |
 
-> **Run only the perf section** to retune existing nodes:
+A first run on a GB200 instance takes roughly 5–10 minutes, most of it in
+the RAID and filesystem steps. It ends with a `HAMMERSPACE INTEGRATION
+COMPLETE` block listing the volumes that were added.
+
+**If it stops** the failing task name tells you which step it was in. Look the
+message up in [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md); the two most
+common first-run stops are a wrong Anvil password (fails in the first 30
+seconds) and a jumbo-frame mismatch (reported by `precheck`, not fatal by
+default). Re-running after a fix is safe — completed steps are skipped.
+
+> **Re-tune existing nodes** without touching storage:
 > ```bash
 > ansible-playbook site.yml -i inventory.oci.yml --tags perf
 > ```
-> Disable the role entirely with `perf_tuning_enabled: false`.
-> Toggle individual sections with `perf_sunrpc_tunables_enabled`, `perf_nfsd_tunables_enabled`, `perf_readahead_enabled`, `perf_irq_pinning_enabled`, `perf_tcp_sysctl_enabled`.
+> Disable the tuning role with `perf_tuning_enabled: false`, or individual
+> sections with `perf_sunrpc_tunables_enabled`, `perf_nfsd_tunables_enabled`,
+> `perf_readahead_enabled`, `perf_irq_pinning_enabled`, `perf_tcp_sysctl_enabled`.
+
+> **Bulk ingest over NFS** (azcopy, rsync, large `cp`) can build up tens or
+> hundreds of GB of dirty page cache before the kernel throttles the writer,
+> which looks like the copy tool consuming all the memory. One opt-in section
+> caps it:
+> ```bash
+> ansible-playbook site.yml --tags writeback -e perf_vm_writeback_enabled=true
+> ```
+> It is off by default because the limit is global — on a Tier 0 node it also
+> throttles writes to the local NVMe. See
+> [`perf_vm_writeback`](VARIABLE_REFERENCE.md#perf_vm_writeback--dirty-page-cache-limits-for-nfs-ingest)
+> before enabling it, and
+> [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md#a-bulk-copy-into-an-nfs-mount-appears-to-consume-all-the-memory)
+> for how to tell kernel page cache from the tool's own buffers.
 
 ---
 
@@ -440,20 +517,29 @@ The playbook will execute these roles in order:
 SSH to a deployed instance and check:
 
 ```bash
-# Check RAID arrays
-cat /proc/mdstat
+cat /proc/mdstat                 # one md array per NUMA node, each [UU...]
+df -h | grep hammerspace         # /hammerspace/hsvol0, hsvol1, ... mounted
+exportfs -v                      # each volume exported to the Anvil IP and client subnets
+systemctl status nfs-server      # active (running)
+showmount -e localhost           # the same export list, seen as a client would
+```
 
-# Check mounts
-df -h | grep hammerspace
+What good looks like:
 
-# Check NFS exports
-exportfs -v
+```
+$ cat /proc/mdstat
+md0 : active raid0 nvme4n1[0] nvme5n1[1] nvme6n1[2] nvme7n1[3]
+md1 : active raid0 nvme0n1[0] nvme1n1[1] nvme2n1[2] nvme3n1[3]
 
-# Check NFS service
-systemctl status nfs-server
+$ df -h | grep hammerspace
+/dev/md0   14T   99G   14T   1% /hammerspace/hsvol0
+/dev/md1   14T   99G   14T   1% /hammerspace/hsvol1
+```
 
-# Test local mount
-showmount -e localhost
+Also confirm the mount guard is up — it is what stops an accidental `umount`:
+
+```bash
+systemctl is-active hammerspace-guards.target     # active
 ```
 
 ### 8.2 Verify in Hammerspace
@@ -479,6 +565,11 @@ curl -sk -u admin:password https://10.241.0.105:8443/mgmt/v1.2/rest/storage-volu
 ```bash
 ansible-playbook verify_nfs.yml -i inventory.oci.yml --limit @.new_instances_limit
 ```
+
+Each node should show as **Healthy** and each volume as **Available** in the
+Hammerspace GUI. A volume that stays **Suspected** usually means the export is
+missing or the mount is not present — see
+[docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md#hammerspace).
 
 ---
 
@@ -808,6 +899,10 @@ python3 assign_az_to_volumes.py --host <ANVIL_IP> --user admin --password-file ~
 
 The Data Instantiator (DI / NFS Mover) moves file instances between storage volumes. DI nodes are typically separate from Tier 0 storage servers but connect to the same Hammerspace cluster.
 
+Skip this section if your cluster already has DSX nodes doing data movement.
+The platform-independent reference for DI, including container images and
+Kubernetes mode, is [docs/DATA_INSTANTIATOR.md](docs/DATA_INSTANTIATOR.md).
+
 ### 11.1 Prerequisites
 
 | Requirement | Description |
@@ -968,7 +1063,7 @@ In k8s mode the decommission also (BEFORE the API teardown):
 - Optionally deletes the namespace
   (`di_k8s_decommission_delete_namespace: true`).
 
-### 11.6 Kubernetes / containerd Mode
+### 11.9 Kubernetes / containerd Mode
 
 For sites running a Kubernetes cluster on bare-metal (e.g., OCI BM GPU
 shapes) where the CRI is containerd and DI must run as a DaemonSet rather
@@ -1049,163 +1144,26 @@ kubectl -n hammerspace-di exec ds/hammerspace-di -- journalctl -u pd-di -n 100
 
 ## 12. Troubleshooting
 
-### Locale errors (non-English control hosts)
+Every run made with `./scripts/run.sh` is logged to `~/logs/ansible-<timestamp>.log`.
+Keep that file — it is what Hammerspace support will ask for.
 
-**Problem:** `ERROR: Ansible could not initialize the preferred locale: unsupported locale setting`
-on hosts whose system locale isn't UTF-8 (Korean ko_KR, Japanese ja_JP, etc.).
-```bash
-# Recommended: use the wrapper (auto-detects installed UTF-8 locale and
-# also sets ANSIBLE_LOG_PATH to ~/logs/ansible-<timestamp>.log)
-./scripts/run.sh playbook site.yml -i inventory.yml
-./scripts/run.sh inventory -i inventory.yml --list
-```
+### Problems that are the same on every platform
 
-**Problem:** wrapper reports `ERROR: no UTF-8 locale is installed on this host`.
-Generate one:
-```bash
-sudo locale-gen en_US.UTF-8                    # Debian / Ubuntu
-sudo dnf install -y glibc-langpack-en          # RHEL / Rocky / Alma
-sudo localedef -i en_US -f UTF-8 en_US.UTF-8   # universal
-```
+These are covered once, in [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md):
 
-### Ansible logs aren't showing up where the alias expects
+| Message | Section |
+|---------|---------|
+| `Ansible could not initialize the preferred locale` | [Before the playbook starts](docs/TROUBLESHOOTING.md#before-the-playbook-starts) |
+| `Hammerspace API configuration missing` / password `evaluated_to: false` | [Before the playbook starts](docs/TROUBLESHOOTING.md#before-the-playbook-starts) |
+| API preflight `HTTP response code: 401 / 403 / 404 / 0` | [Before the playbook starts](docs/TROUBLESHOOTING.md#hammerspace-api-preflight-fails-in-the-first-30-seconds) |
+| `Boot / protected-disk detection returned an EMPTY list` | [Disk discovery and the safety gate](docs/TROUBLESHOOTING.md#disk-discovery-and-the-safety-gate) |
+| `REFUSING TO PROCEED — candidate storage devices overlap with protected disks` | [Disk discovery and the safety gate](docs/TROUBLESHOOTING.md#disk-discovery-and-the-safety-gate) |
+| `Discovery produced 0 RAID arrays` | [Disk discovery and the safety gate](docs/TROUBLESHOOTING.md#discovery-produced-0-raid-arrays) |
+| `Device or resource busy` from `mdadm` on a re-run | [RAID and filesystems](docs/TROUBLESHOOTING.md#raid-and-filesystems) |
+| `Could not find or access '/…/plays/…'` | [Before the playbook starts](docs/TROUBLESHOOTING.md#before-the-playbook-starts) |
+| Volume shows **Suspected** | [Hammerspace](docs/TROUBLESHOOTING.md#hammerspace) |
 
-**Problem:** You set `alias ansible-playbook='ANSIBLE_LOG_PATH=... ansible-playbook'` in `~/.bashrc`, but `./scripts/run.sh playbook ...` doesn't honor it.
-
-**Cause:** Shell aliases don't propagate through `exec`. The wrapper now sets a sensible default itself:
-```bash
-ANSIBLE_LOG_PATH=${HOME}/logs/ansible-<timestamp>.log
-```
-Override at invocation time:
-```bash
-ANSIBLE_LOG_PATH=/custom/path.log ./scripts/run.sh playbook site.yml -i inventory.yml
-ANSIBLE_LOG_DIR=/var/log/ansible  ./scripts/run.sh playbook site.yml -i inventory.yml
-```
-The wrapper echoes the active log path to stderr on every invocation.
-
-### RAID create fails with `Device or resource busy` on re-run
-
-**Symptom:** First run succeeded and created the array (e.g. `/dev/md0`). After a reboot, re-running the playbook fails at `raid_setup`:
-```
-mdadm: super1.x cannot open /dev/sdb: Device or resource busy
-mdadm: cannot open /dev/sdb: Device or resource busy
-```
-`/proc/mdstat` shows the array is alive but under a different name (typically `/dev/md127`).
-
-**Cause:** mdadm.conf wasn't honored at boot (initramfs / homehost mismatch), so the kernel auto-assembled the array under the fallback `/dev/md127` name. The role's idempotency check used to compare *array name* only — `'md0' not in ['md127']` → tried to recreate over drives that are already in `md127`.
-
-**Fixed in `roles/raid_setup/tasks/main.yml`:** `lsblk` runs against each planned drive to find any md device it already belongs to. If found, `mdadm --create` is skipped and `raid_arrays[*].device` + `mount_points[*].device` are remapped to the actual `/dev/mdN`. Filesystem_setup then sees the existing XFS and skips `mkfs`, and the mount targets the real device.
-
-Just re-run the playbook on the affected hosts:
-```bash
-./scripts/run.sh playbook site.yml -i inventory.oci.yml --limit "inst-*"
-```
-You'll see lines like:
-```
-Planned array 'md0' is already assembled as /dev/md127 — skipping mdadm --create.
-Downstream mount_points will be remapped to use the actual device.
-```
-
-To verify the fix on a host you don't want to re-deploy yet, run the regression suite:
-```bash
-./scripts/run.sh playbook tests/integration/test_raid_idempotency.yml -i localhost, -c local
-```
-
-If you actually want to nuke the existing array and re-create with the original planned name (`md0`), set `force_raid_recreate: true` — but only after confirming no Hammerspace volumes have been written to the array.
-
-### Boot-drive safety gate failure
-
-**Symptom:** Playbook aborts at `nvme_discovery` with one of:
-
-1. `Boot / protected-disk detection returned an EMPTY list.`
-   The playbook could not identify which disks are protected (host `/`, swap, mounted FS, md, or LVM). It will not proceed because running `mkfs` without that exclusion list could wipe the OS disk.
-   - **Were you running `--check`?** This was the cause of the 2026-08-26 report. `command`/`shell`/`script` do not support check mode, so Ansible skips them; before the fix that meant every detection task was skipped, all four lists came back empty, and the gate aborted the dry run on a *simulated* empty result. Tell-tale signature: all four lists show `(none)`, `Primary boot disk` is blank, and the recap shows changes (`changed=4`) even though nothing was applied. The read-only detection tasks now carry `check_mode: false`, so `--check` works — if you are on an older checkout, either update or drop `--check`.
-   - **Then read the failure message.** Since 2026-08-26 the task dumps the host's mount/swap/sysfs topology inline (`command -v` for findmnt/lsblk/pvs, `findmnt TARGET,SOURCE,MAJ:MIN,FSTYPE`, `/proc/self/mountinfo`, `/proc/swaps`, `/sys/class/block`, `lsblk`). That block is usually enough to diagnose without touching the host.
-   - **To reproduce by hand**, run the detection script directly on the target:
-     ```bash
-     bash roles/nvme_discovery/files/scan_disks.sh          # expect PROTECTED / ROOT lines
-     findmnt -n -o TARGET,SOURCE,MAJ:MIN,FSTYPE
-     cat /proc/swaps
-     ls -1 /sys/dev/block
-     ```
-     Detection resolves each mountpoint through its `MAJ:MIN` number, so a `SOURCE` of `/dev/root`, `/dev/sda2[/@]` (btrfs subvolume) or `UUID=...` is fine — what matters is that `findmnt -o MAJ:MIN /` returns a non-zero major and that `/sys/dev/block/<maj>:<min>` exists. If those are empty, the host is in a state the playbook cannot reason about — fix the host first.
-   - **Only on a genuinely diskless / netboot system** (no OS disk at all): set `allow_empty_protected_disks: true` in `vars/main.yml`.
-
-2. `REFUSING TO PROCEED — candidate storage devices overlap with protected disks.`
-   Detection found a protected disk, but the device list about to be RAIDed includes it. The boot drive is being targeted. **Do NOT override this with `allow_empty_protected_disks`** — it indicates a real bug in detection or a misconfigured exclusion list. Open an issue with the displayed "Overlap:" line and the output of `lsblk -nrpso NAME,TYPE /dev/<overlap>`.
-
-Run the regression suite to confirm safety logic on the affected host:
-```bash
-./scripts/run.sh playbook tests/integration/test_boot_device_safety.yml -i localhost, -c local
-```
-
-### `Discovery produced 0 RAID arrays` on a host with existing arrays
-
-**Symptom:** Re-run on a host that has working `/dev/mdN` arrays + `/hammerspace/hsvol*` mounts from a prior deployment:
-```
-TASK [nvme_discovery : Validate discovery produced RAID arrays]
-fatal: [inst-X]: FAILED!
-  msg: Discovery produced 0 RAID arrays. Check:
-       - storage_type is set correctly (current: scsi)
-       - Drives exist and are not excluded by boot device detection
-       - boot_device detected: sda
-```
-
-**Cause (fixed 2026-05-18, hardened 2026-05-20):** the boot-drive safety overhaul put md array members in `_protected_disks`, so all the data disks got excluded from discovery. The 2026-05-18 split into three lists fixed the bare `/proc/mdstat` path, but `/proc/mounts` had a second leak: walking `/dev/md127` (mounted at `/hammerspace/hsvol0`) inversely via `lsblk -nrpso NAME,TYPE` lists its physical members (sdb, sdc, ...) as TYPE=disk and they ended up in `_protected_disks` again.
-
-**Fix:** detection now uses three lists with a key restriction on the mount walk:
-- `_protected_disks` (strict) — **only walks SYSTEM mountpoints** via an explicit allow-list (`/`, `/boot`, `/boot/efi`, `/usr`, `/var`, `/home`, swap, etc.). Data mounts like `/hammerspace/*` are NOT walked. Plus active swap.
-- `_md_member_disks` — informational. NOT excluded. `raid_setup` finds the existing `/dev/mdN`, skips `mdadm --create`, and remaps `mount_points[*].device` to the actual device.
-- `_lvm_pv_disks` — informational.
-
-Pull the fix (`Solutions/Ansible-Tier0` ≥ `224f49d`) and re-run. The role will log:
-```
-Planned array 'md0' is already assembled as /dev/md127 — skipping mdadm --create.
-```
-
-Regression test: `tests/integration/test_protected_vs_md_split.yml` (5 cases — TEST 5 covers exactly this `/dev/mdN mounted at /hammerspace/*` scenario).
-
-### `Could not find or access '/.../plays/...'` (DI or other role)
-
-**Symptom:** A task in `roles/di/`, `roles/hammerspace_integration/`, or anywhere else fails with:
-```
-Could not find or access '/home/.../Ansible-Tier0/plays/container/Containerfile'
-on the Ansible Controller.
-```
-(or `plays/vars/vault.yml`, `plays/payload/...`, etc.)
-
-**Cause:** Same `playbook_dir` resolution gotcha as the vault.yml bug. `playbook_dir` resolves to `.../plays/` inside imported plays — references like `{{ playbook_dir }}/container/Containerfile` therefore look for `plays/container/Containerfile`, which doesn't exist.
-
-**Fix:** `vars/main.yml` defines `repo_root: "{{ playbook_dir }}/.."` once. All controller-side paths in `plays/` and `roles/` use `{{ repo_root }}/X` instead of `{{ playbook_dir }}/X`. Pull a build that includes this change.
-
-**Regression test:** `tests/integration/test_repo_root.yml` includes an audit pass (`grep playbook_dir roles/ plays/`) that fails CI if anyone re-introduces the old pattern.
-
-### "Hammerspace API configuration missing" after a successful preflight earlier in the run
-
-**Symptom:** The first play prints `Hammerspace API preflight OK` (or quietly skips it without error), several nodes register successfully, then the serialized integration play fails on assertions:
-```
-fatal: [inst-X]: FAILED!
-  assertion: hammerspace_api_password is defined
-  evaluated_to: false
-  msg: Hammerspace API configuration missing. Set hammerspace_api_host,
-       hammerspace_api_user, hammerspace_api_password
-```
-You can `curl -u admin:$VAULTPW` against the Anvil API and it works.
-
-**Cause:** Each play in `plays/*.yml` is imported via `import_playbook`, which means **`playbook_dir` resolves to `Ansible-Tier0/plays/`, not to the repo root.** Until commit `29947f7` the vault-loading task referenced `{{ playbook_dir }}/vars/vault.yml` → `Ansible-Tier0/plays/vars/vault.yml` (doesn't exist). The result: `vault_hammerspace_api_password` was never defined, so the templated value of `hammerspace_api_password = "{{ vault_hammerspace_api_password }}"` raised an undefined-variable error at render time. The first play's API preflight skipped silently because its `when:` guard collapsed to false; the serialized play used the role's stricter `assert` and failed.
-
-**Fixed:** all four `plays/*.yml` now use `{{ playbook_dir }}/../vars/vault.yml`. Pull `29947f7` (or later) and re-run.
-
-**For new plays added under `plays/`:** always reference vault as `{{ playbook_dir }}/../vars/vault.yml`. The inline comment in each play file documents the layout assumption.
-
-### Hammerspace API preflight failure
-
-The playbook calls `/mgmt/v1.2/rest/cntl` at the start to validate connectivity + credentials. If it fails, you'll see one of:
-- **`HTTP response code: 401`** — bad `hammerspace_api_user` or `vault_hammerspace_api_password`. Verify the credentials in your vault file.
-- **`HTTP response code: 403`** — user authenticated but lacks the admin role.
-- **`HTTP response code: 404`** — Anvil version doesn't expose `/cntl`. Update to a recent Anvil build or change the endpoint in `plays/storage.yml` to something the cluster does respond to (e.g. `/nodes`).
-- **`HTTP response code: 0`** — TCP reached the host but TLS or HTTP didn't respond. Check the port (`hammerspace_api_port`, default 8443) and Anvil health.
-- **`wait_for` timeout** — `hammerspace_api_host` is unreachable from the control machine. Check routing/security lists.
+The sections below are specific to OCI.
 
 ### OCI Inventory Issues
 
@@ -1304,6 +1262,16 @@ ansible-playbook site.yml -i inventory.oci.yml --check
 ## 13. Decommissioning Instances
 
 When terminating GPU instances, you should first remove them from Hammerspace to avoid orphaned nodes and volumes.
+
+Two tools do this; both leave the data on the instance untouched:
+
+| Tool | Use when |
+|------|----------|
+| `decommission_tier0.yml` | The instances are still in your inventory — `ansible-playbook decommission_tier0.yml -i inventory.oci.yml --limit <hosts> -e decommission_confirm=true` |
+| `cleanup_instance_nodes.py` (below) | The instances may already be gone, or you want to select nodes by name pattern |
+
+To wipe an instance back to bare metal instead, use `reset-tier0-host.yml`
+([docs/OPERATOR_SCRIPTS.md](docs/OPERATOR_SCRIPTS.md#reset-tier0-hostyml--back-to-bare-metal)).
 
 ### 13.1 Using the Cleanup Script
 
@@ -1546,7 +1514,8 @@ python3 cleanup_instance_nodes.py \
 
 ## Support
 
-For issues or questions:
-- Check the main [README.md](README.md) for detailed configuration options
-- Review `vars/main.yml` for all available settings
-- Contact Hammerspace support for cluster-related issues
+- [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md) — symptoms, causes and fixes
+- [VARIABLE_REFERENCE.md](VARIABLE_REFERENCE.md) — every setting with its default
+- [docs/OPERATOR_SCRIPTS.md](docs/OPERATOR_SCRIPTS.md) — every playbook and script used in this guide
+- [RACK_OPERATIONS_RUNBOOK.md](RACK_OPERATIONS_RUNBOOK.md) — maintenance procedures once you are in production
+- Hammerspace support for cluster-side issues — attach the log from `~/logs/ansible-<timestamp>.log`
