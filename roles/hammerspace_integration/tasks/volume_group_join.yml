@@ -269,7 +269,7 @@
                   PUT {{ hs_api_url }}/volume-groups/{{ _vg_uuid }}
 
                   The API said:
-                    {{ (_vg_put_raw.stdout_lines | default([]))[:-1] | join('\n  ') | trim | default('(empty response body)', true) }}
+                    {{ (_vg_put_raw.stdout_lines | default([]))[:-1] | join('\n  ') | trim | regex_replace('(?i)authorization:\\s*Basic\\s+[A-Za-z0-9+/=]+', 'authorization: Basic <redacted>') | default('(empty response body)', true) }}
 
                   No volumes were added. Existing members are unaffected — the
                   update is a single atomic PUT that either applies or does not.
@@ -277,7 +277,9 @@
                   The curl task carries no_log (its command line holds the API
                   password), so the body above is the only record of what the
                   API objected to — it is reproduced here deliberately. The
-                  response cannot contain the credential.
+                  Anvil echoes the request headers back inside some error
+                  bodies, so any `authorization:` value is redacted before
+                  printing.
                   {% if ((_vg_put_raw.stdout_lines | default(['0']))[-1] | default('0') | int) == 0 %}
 
                   HTTP 0 with no body means curl produced no output at all —

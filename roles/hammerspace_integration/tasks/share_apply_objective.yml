@@ -76,7 +76,7 @@
            &applicability={{ share_objective_config.applicability | default('TRUE') | upper }}
 
       The API said:
-        {{ (objective_apply_raw.stdout_lines | default([]))[:-1] | join('\n  ') | trim | default('(empty response body)', true) }}
+        {{ (objective_apply_raw.stdout_lines | default([]))[:-1] | join('\n  ') | trim | regex_replace('(?i)authorization:\s*Basic\s+[A-Za-z0-9+/=]+', 'authorization: Basic <redacted>') | default('(empty response body)', true) }}
 
       The curl task carries no_log (its command line holds the API password),
       so the body above is the only record of what the API objected to.

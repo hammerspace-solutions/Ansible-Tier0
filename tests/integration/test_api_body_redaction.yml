@@ -1,0 +1,83 @@
+---
+# Regression test: API response bodies printed in failure messages must not
+# carry the Authorization header.
+#
+# The Hammerspace API echoes the request headers back inside some error bodies
+# (ENTITY_NOT_FOUND, errorCode 4002, "headers":"host: ...\nauthorization: Basic
+# <base64 admin:password>\n..."). The curl tasks are no_log because the command
+# line holds the password, so the failure messages print the response body
+# instead — and that body can hold the very same credential. scripts/run.sh
+# writes every run to ~/logs, so an un-redacted body wrote the cluster admin
+# credential to disk. The old comment claimed "the response cannot contain the
+# credential"; the Anvil does echo it.
+#
+# Usage:
+#   ansible-playbook tests/integration/test_api_body_redaction.yml -i localhost, -c local
+
+- name: API body redaction regression test
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  become: false
+  vars:
+    # Dummy credential: base64("admin:not-a-real-password"). Never a real one.
+    _secret_b64: "YWRtaW46bm90LWEtcmVhbC1wYXNzd29yZA=="
+    _body: >-
+      [{"errorCode":4002,"args":["storage volume","10.1.16.5::/nvme/tier0"],"message":"ENTITY_NOT_FOUND","stack":null,"headers":"host: 10.1.96.37:8443\nuser-agent: curl/7.76.1\naccept: */*\nauthorization: Basic {{ _secret_b64 }}\ncontent-type: application/json\ncontent-length: 664\n"}]
+    _tasks_dir: "{{ playbook_dir }}/../../roles/hammerspace_integration/tasks"
+
+  tasks:
+    - name: 'TEST 1: the redaction used at every print site removes the credential'
+      vars:
+        _out: >-
+          {{ _body | trim | regex_replace('(?i)authorization:\s*Basic\s+[A-Za-z0-9+/=]+', 'authorization: Basic <redacted>') }}
+      ansible.builtin.assert:
+        that:
+          - _secret_b64 not in _out
+          - "'authorization: Basic <redacted>' in _out"
+          - "'ENTITY_NOT_FOUND' in _out"
+          - "'content-type: application/json' in _out"
+        quiet: true
+
+    - name: Find the role's task files
+      ansible.builtin.find:
+        paths: "{{ _tasks_dir }}"
+        patterns: "*.yml"
+      register: _files
+
+    - name: 'TEST 2: audit — every line that prints an API body is redacted'
+      ansible.builtin.set_fact:
+        _site_counts: >-
+          {%- set ns = namespace(total=0, bad=[]) -%}
+          {%- for f in _files.files -%}
+          {%- for line in lookup('file', f.path).split('\n') -%}
+          {%- if "default('(empty response body)'" in line and not line.strip().startswith('#') -%}
+          {%- set ns.total = ns.total + 1 -%}
+          {%- if 'authorization: Basic <redacted>' not in line -%}
+          {%- set ns.bad = ns.bad + [f.path | basename ~ ': ' ~ line.strip()] -%}
+          {%- endif -%}
+          {%- endif -%}
+          {%- endfor -%}
+          {%- endfor -%}
+          {{ {'total': ns.total, 'bad': ns.bad} | to_json }}
+
+    - name: 'TEST 2 ASSERT: no unredacted site, and the audit saw real sites'
+      ansible.builtin.assert:
+        that:
+          - (_site_counts | from_json).bad | length == 0
+          - (_site_counts | from_json).total >= 4
+        fail_msg: "Unredacted body print sites: {{ (_site_counts | from_json).bad }}"
+        quiet: true
+
+    - name: 'TEST 3: no comment claims the response cannot contain the credential'
+      ansible.builtin.assert:
+        that:
+          - (lookup('file', item.path) | regex_findall('(?i)cannot\s+contain\s+the\s+credential') | length) == 0
+        quiet: true
+      loop: "{{ _files.files }}"
+      loop_control:
+        label: "{{ item.path | basename }}"
+
+    - name: PASSED
+      ansible.builtin.debug:
+        msg: "test_api_body_redaction PASSED (3 tests)"

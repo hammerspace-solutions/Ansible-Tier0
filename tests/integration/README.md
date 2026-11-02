@@ -477,6 +477,22 @@ Test cases:
 | 4 | Fixed template + `rc=1` (unload failed, module in use) | Renders `REBOOT` — the branch still fires |
 | 5 | `sunrpc_unload` undefined + `pool_mode=pernode` | Renders `OK` — `is defined` short-circuits cleanly |
 
+## `test_api_body_redaction.yml`
+
+The Hammerspace API echoes the request headers inside some error bodies
+(`ENTITY_NOT_FOUND`, `errorCode 4002`, `"headers":"...authorization: Basic
+<base64 admin:password>..."`). The curl tasks are `no_log`, so the failure
+messages print the response body instead — and that body held the credential,
+which `scripts/run.sh` then wrote to `~/logs`. The old comment claimed the
+response "cannot contain the credential".
+
+| # | Scenario | Expected |
+|---|----------|----------|
+| 1 | Real 404 body shape with a dummy credential, through the regex used at each site | Token gone, `authorization: Basic <redacted>` present, error code and other headers intact |
+| 2 | **Audit** every line printing `(empty response body)` in the role | Each carries the redaction; count guard (>= 4) so it cannot pass vacuously |
+| 3 | No comment says the response cannot contain the credential | Zero matches |
+
+Mutation-tested: un-redacting one site and restoring the false claim each fail it.
 ## `test_share_objective_status.yml`
 
 Pins the 2026-09-18 field report: a write from a Tier 0 node went to the DSX
