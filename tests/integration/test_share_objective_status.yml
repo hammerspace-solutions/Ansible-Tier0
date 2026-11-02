@@ -331,6 +331,60 @@
             _test_failures: "{{ _test_failures + ['TEST 5: ' ~ (ansible_failed_result.msg | default('unknown') | replace('\n', ' '))] }}"
 
     # ========================================================================
+    # TEST 6: the ambiguity guard. The join handles several volume groups
+    # (per-AZ group_vars); a SHARE objective cannot — it is cluster-wide and
+    # names one group. So a multi-group run must fail rather than confine the
+    # share to one AZ's volumes.
+    # ========================================================================
+    - name: 'TEST 6: a multi-group run fails unless the objective is explicit'
+      block:
+        - name: Resolve groups exactly as tier0_place_on_group.yml does
+          ansible.builtin.set_fact:
+            _t6_one: >-
+              {{ ['tier0-nvme', 'tier0-nvme'] | map('string') | map('trim')
+                 | reject('equalto', '') | unique | sort | list }}
+            _t6_many: >-
+              {{ ['tier0-az2', 'tier0-az1', 'tier0-az2'] | map('string') | map('trim')
+                 | reject('equalto', '') | unique | sort | list }}
+
+        - name: Evaluate the guard for each case
+          ansible.builtin.set_fact:
+            # when: _t0po_groups | length > 1 and no explicit objective
+            _t6_gate_one: "{{ (_t6_one | length > 1) and (('' | length) == 0) }}"
+            _t6_gate_many: "{{ (_t6_many | length > 1) and (('' | length) == 0) }}"
+            _t6_gate_many_explicit: >-
+              {{ (_t6_many | length > 1)
+                 and (('place-on-tier0-all' | length) == 0) }}
+
+        - name: 'TEST 6 ASSERT: fires only on ambiguity, and the escape works'
+          ansible.builtin.assert:
+            that:
+              # One group (however many hosts name it) — proceed.
+              - _t6_one == ['tier0-nvme']
+              - not (_t6_gate_one | bool)
+              # Two groups, no explicit objective — hard failure.
+              - "_t6_many == ['tier0-az1', 'tier0-az2']"
+              - _t6_gate_many | bool
+              # Two groups, objective named explicitly — proceed.
+              - not (_t6_gate_many_explicit | bool)
+            fail_msg: |
+              REGRESSION in the share-objective ambiguity guard.
+              one: {{ _t6_one }} gate={{ _t6_gate_one }} (expected false)
+              many: {{ _t6_many }} gate={{ _t6_gate_many }} (expected true)
+              many + explicit objective: {{ _t6_gate_many_explicit }} (expected false)
+              Applying place-on-<first group> to a cluster-wide share would
+              confine it to one AZ's volumes and silently exclude the rest;
+              failing on every multi-AZ run would make the flag unusable.
+
+        - name: Record TEST 6 pass
+          ansible.builtin.set_fact:
+            _test_passes: "{{ _test_passes + ['TEST 6: ambiguity guard — fires on 2+ groups, not on one, and is escapable with an explicit objective'] }}"
+      rescue:
+        - name: Record TEST 6 failure
+          ansible.builtin.set_fact:
+            _test_failures: "{{ _test_failures + ['TEST 6: ' ~ (ansible_failed_result.msg | default('unknown') | replace('\n', ' '))] }}"
+
+    # ========================================================================
     # Report
     # ========================================================================
     - name: Print test report

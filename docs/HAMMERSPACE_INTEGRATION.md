@@ -138,6 +138,34 @@ hammerspace_volume_group: "tier0-nvme"
 - Existing members are kept; the update only appends.
 - Re-running is a no-op once the volumes are members.
 
+### Choosing the group per run, or per AZ
+
+Set it for a single run — command-line values override `vars/main.yml`:
+
+```bash
+ansible-playbook site.yml -i inventory.yml -e hammerspace_volume_group=tier0-nvme
+```
+
+Or set it differently per host or per inventory group. Each host's volumes go
+to the group that host names, and each group is updated once:
+
+```yaml
+# group_vars/AZ1.yml
+hammerspace_volume_group: "tier0-az1"
+
+# group_vars/AZ2.yml
+hammerspace_volume_group: "tier0-az2"
+```
+
+The plan is printed before anything is written, so you can confirm which
+volumes are going to which group:
+
+```
+Volume group join plan (2 group(s)):
+  tier0-az1 <- 2 volume(s) from node101, node102
+  tier0-az2 <- 2 volume(s) from node201, node202
+```
+
 You can also create simple groups by name pattern, or add specific volumes:
 
 ```yaml
@@ -211,6 +239,13 @@ hammerspace_tier0_place_on_group: true
 
 A missing objective, share or group is a hard failure — a silent skip would
 reproduce exactly the "writes go to the DSX" symptom.
+
+A share objective is cluster-wide and can name only one volume group, so
+unlike the volume join this cannot follow a run that uses several (per-AZ
+groups, for example). Such a run stops and offers three ways forward: name the
+objective explicitly with `hammerspace_tier0_place_on_objective`, apply one
+that names a group *containing* the others (a volume group may hold other
+volume groups), or run one AZ at a time with `--limit`.
 
 This selects the **tier**, not the node: the Anvil balances new files across
 the group's volumes. If you need each GPU node to write to *its own* NVMe

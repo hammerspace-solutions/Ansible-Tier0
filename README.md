@@ -237,6 +237,7 @@ ansible-playbook preflight_check.yml -i inventory.yml
 | Remove a node from Hammerspace, keep its data | `decommission_tier0.yml` |
 | Wipe a node back to bare metal | `reset-tier0-host.yml -e reset_confirm=true` |
 | Make new files land on Tier 0 first | `hammerspace_tier0_place_on_group: true` — [docs/HAMMERSPACE_INTEGRATION.md](docs/HAMMERSPACE_INTEGRATION.md#making-new-files-land-on-tier-0) |
+| Pick the volume group per run, or per AZ | `-e hammerspace_volume_group=...`, or `group_vars/AZ1` — [docs/HAMMERSPACE_INTEGRATION.md](docs/HAMMERSPACE_INTEGRATION.md#choosing-the-group-per-run-or-per-az) |
 | Deploy mover (DI) nodes | [docs/DATA_INSTANTIATOR.md](docs/DATA_INSTANTIATOR.md) |
 | Harden for production | [CLEANUP_PLAN.md](CLEANUP_PLAN.md) |
 

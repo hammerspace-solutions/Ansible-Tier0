@@ -477,22 +477,6 @@ Test cases:
 | 4 | Fixed template + `rc=1` (unload failed, module in use) | Renders `REBOOT` — the branch still fires |
 | 5 | `sunrpc_unload` undefined + `pool_mode=pernode` | Renders `OK` — `is defined` short-circuits cleanly |
 
-## `test_api_body_redaction.yml`
-
-The Hammerspace API echoes the request headers inside some error bodies
-(`ENTITY_NOT_FOUND`, `errorCode 4002`, `"headers":"...authorization: Basic
-<base64 admin:password>..."`). The curl tasks are `no_log`, so the failure
-messages print the response body instead — and that body held the credential,
-which `scripts/run.sh` then wrote to `~/logs`. The old comment claimed the
-response "cannot contain the credential".
-
-| # | Scenario | Expected |
-|---|----------|----------|
-| 1 | Real 404 body shape with a dummy credential, through the regex used at each site | Token gone, `authorization: Basic <redacted>` present, error code and other headers intact |
-| 2 | **Audit** every line printing `(empty response body)` in the role | Each carries the redaction; count guard (>= 4) so it cannot pass vacuously |
-| 3 | No comment says the response cannot contain the credential | Zero matches |
-
-Mutation-tested: un-redacting one site and restoring the false claim each fail it.
 ## `test_share_objective_status.yml`
 
 Pins the 2026-09-18 field report: a write from a Tier 0 node went to the DSX
@@ -509,9 +493,53 @@ auto-created `place-on-<group>`.
 | 3 | **Audit** `share_apply_objective.yml` | POST is `no_log` + `failed_when: false`; a fail task gated on `status not in [200, 201, 202]` prints the body; no `-o /dev/stdout`; `run_once` on every task |
 | 4 | Derivation | `place-on-<hammerspace_volume_group>`; shares from `hammerspace_shares`; overrides honoured; an EMPTY override string falls back |
 | 5 | **Audit** `tier0_place_on_group.yml` + wiring | Included after `create_share.yml`, gated on the flag, `run_once`, GET-only on `/objectives/`, hard failure on `!= 200` / empty group / empty share list, lookup `no_log` + `failed_when: false`, defaults + docs present |
+| 6 | One group / two groups / two groups + explicit objective | Guard fires only on ambiguity — a share objective is cluster-wide and names one group — and `hammerspace_tier0_place_on_objective` escapes it |
 
 Mutation-tested: dropping the status gate, one `run_once`, `failed_when`, the
-`!= 200` failure, or the empty-share failure each fails the relevant test.
+`!= 200` failure, the empty-share failure, or the multi-group guard each fails
+the relevant test.
+
+## `test_volume_group_join.yml`
+
+The volume group join is a read-modify-write over the whole membership list,
+so the dangerous property is DATA LOSS IN THE GROUP, not deployment failure:
+a bug silently evicts other people's volumes and nothing fails. It also has
+to honour a per-host / per-AZ `hammerspace_volume_group` — `run_once`
+evaluates variables in ONE host's context, so a single scalar read sent every
+volume in the play to whichever group that host named, and skipped the step
+entirely when that host named none.
+
+| # | Scenario | Expected |
+|---|----------|----------|
+| 1 | Group holds 2 volumes; run creates 2, one already a member | Append-only — both pre-existing kept, 1 added, no duplicates |
+| 2 | Re-run with everything already a member | Zero additions, no PUT issued |
+| 3 | **Audit** orchestrator + per-group body | `run_once` union write over `ansible_play_hosts`; the per-group body never re-reads the play var; never creates a group; 404 fatal; membership re-read; opt-in gate on the include considers every host |
+| 4 | **Audit** `add_volume.yml` | Records the exact volume name it used — never re-derived for grouping |
+| 5 | 4 hosts, 2 AZs, a group each | One plan entry per group, volumes unioned per group, nothing crosses over; the old single-scalar read is shown sending all 4 to one group |
+| 6 | One group / empty per-host value / no group named | Unchanged single union write; empty value falls back to the play value; nothing produces a group named `''` |
+| 7 | **Audit** the split | Per-group include with `loop_var: _vgj`; plan and per-group facts reset (`set_fact` persists across loop iterations and across `hammerspace_serial` batches); share-objective ambiguity guard with an escape |
+
+Mutation-tested: dropping the plan reset, re-reading the play var in the
+per-group body, dropping the per-group fact reset, accepting an empty group
+name, softening the ambiguity guard, or narrowing the include gate back to the
+current host each fails the relevant test.
+
+## `test_api_body_redaction.yml`
+
+The Hammerspace API echoes the request headers inside some error bodies
+(`ENTITY_NOT_FOUND`, `errorCode 4002`, `"headers":"...authorization: Basic
+<base64 admin:password>..."`). The curl tasks are `no_log`, so the failure
+messages print the response body instead — and that body held the credential,
+which `scripts/run.sh` then wrote to `~/logs`. The old comment claimed the
+response "cannot contain the credential".
+
+| # | Scenario | Expected |
+|---|----------|----------|
+| 1 | Real 404 body shape with a dummy credential, through the regex used at each site | Token gone, `authorization: Basic <redacted>` present, error code and other headers intact |
+| 2 | **Audit** every line printing `(empty response body)` in the role | Each carries the redaction; count guard (>= 4) so it cannot pass vacuously |
+| 3 | No comment says the response cannot contain the credential | Zero matches |
+
+Mutation-tested: un-redacting one site and restoring the false claim each fail it.
 
 ## `test_api_host_required.yml`
 

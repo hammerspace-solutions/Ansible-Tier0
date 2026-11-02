@@ -647,9 +647,26 @@ hammerspace_gpu_fabric_az_update_file: true
 #     afterwards to confirm nothing was lost.
 #   - re-running is a no-op once the volumes are members.
 #
-# The update runs ONCE per play, not once per host: hammerspace_integration
-# runs on all storage_servers in parallel, and a per-host read-modify-write
-# would let the last writer discard volumes added by the others.
+# The update runs ONCE per play per GROUP, not once per host:
+# hammerspace_integration runs on all storage_servers in parallel, and a
+# per-host read-modify-write would let the last writer discard volumes added
+# by the others.
+#
+# PER-HOST / PER-AZ GROUPS
+# ------------------------
+# This may be set per host or per inventory group, and each host's volumes go
+# to the group THAT host names — one read-modify-write per distinct group:
+#
+#   group_vars/AZ1.yml:  hammerspace_volume_group: "tier0-az1"
+#   group_vars/AZ2.yml:  hammerspace_volume_group: "tier0-az2"
+#
+# Or for one run, on the command line (extra vars beat this file):
+#   ansible-playbook site.yml -e hammerspace_volume_group=tier0-nvme
+#
+# Note hammerspace_tier0_place_on_group below CANNOT follow a multi-group run:
+# a share objective is cluster-wide and names one group. Such a run fails and
+# asks for hammerspace_tier0_place_on_objective, a group containing them all,
+# or one AZ at a time via --limit.
 #
 # Leave empty to skip volume group membership entirely.
 hammerspace_volume_group: ""

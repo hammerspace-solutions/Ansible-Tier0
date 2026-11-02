@@ -133,20 +133,38 @@
     # ========================================================================
     - name: 'TEST 3: audit volume_group_join.yml'
       block:
-        - name: Read the task file
+        # The write body lives in volume_group_join_one.yml (one include per
+        # distinct group); the orchestrator builds the plan. `_vgj` is both,
+        # so the guarantees are audited wherever they moved to.
+        - name: Read the task files
           ansible.builtin.slurp:
-            src: "{{ playbook_dir }}/../../roles/hammerspace_integration/tasks/volume_group_join.yml"
+            src: "{{ item }}"
+          loop:
+            - "{{ playbook_dir }}/../../roles/hammerspace_integration/tasks/volume_group_join.yml"
+            - "{{ playbook_dir }}/../../roles/hammerspace_integration/tasks/volume_group_join_one.yml"
           register: _vgj_src
 
         - name: Decode
           ansible.builtin.set_fact:
-            _vgj: "{{ _vgj_src.content | b64decode }}"
+            _vgj_orch: "{{ _vgj_src.results[0].content | b64decode }}"
+            _vgj_one: "{{ _vgj_src.results[1].content | b64decode }}"
+            _vgj: "{{ (_vgj_src.results[0].content | b64decode) ~ (_vgj_src.results[1].content | b64decode) }}"
 
         - name: 'TEST 3 ASSERT: the write is run_once, not per-host'
+          vars:
+            _vgj_read_needle: '{% raw %}{{ hammerspace_volume_group{% endraw %}'
+            _vgj_group_needle: '{% raw %}{{ _vgj.group{% endraw %}'
           ansible.builtin.assert:
             that:
-              - "'run_once: true' in _vgj"
-              - "'ansible_play_hosts' in _vgj"
+              - "'run_once: true' in _vgj_orch"
+              - "'ansible_play_hosts' in _vgj_orch"
+              # The per-group body must NOT re-read the bare play var: it is
+              # included once per group and must act on the group it was
+              # given. Prose naming the variable in a failure message is
+              # fine, so the needle is a TEMPLATED read — built under
+              # {% raw %}, or assert templates it before seeing it.
+              - _vgj_read_needle not in _vgj_one
+              - _vgj_group_needle in _vgj_one
             fail_msg: |
               REGRESSION: the volume group update must be run_once over the
               union of all hosts' volumes. Per-host read-modify-write races —
@@ -169,8 +187,8 @@
         - name: 'TEST 3 ASSERT: membership is re-read to confirm nothing was lost'
           ansible.builtin.assert:
             that:
-              - "'Verify group membership after the update' in _vgj"
-              - "'_vg_final_names' in _vgj"
+              - "'Verify group membership after the update' in _vgj_one"
+              - "'_vg_final_names' in _vgj_one"
             fail_msg: |
               REGRESSION: the post-write verification was removed. Re-reading
               membership is what detects a concurrent writer having dropped
@@ -182,9 +200,16 @@
               # Substring checks, not a reconstructed expression: the exact
               # parenthesisation of the `when:` is an implementation detail and
               # an over-precise match fails for the wrong reason.
-              - "(_vgj | regex_findall('when:.*hammerspace_volume_group.*length > 0')) | length >= 1"
+              # The opt-in gate now lives on the include in main.yml, and
+              # must consider EVERY host: the join is run_once, so a gate
+              # reading only the current host's value skips the whole step
+              # when the picked host names no group.
+              - "(_main_raw | regex_findall('hammerspace_volume_group.*trim \\| length > 0')) | length >= 1"
+              - "'hostvars' in (_main_raw | regex_search('include_tasks: volume_group_join.yml(?:.|\\n)*?(?=\\n- name:)'))"
               - "(_vars_raw | regex_findall('hammerspace_volume_group:')) | length >= 1"
               - "'volume_group_join.yml' in _main_raw"
+              # An empty value must never become a group named ''.
+              - "\"rejectattr('group', 'equalto', '')\" in _vgj_orch"
             fail_msg: |
               REGRESSION: the feature must default to off
               (hammerspace_volume_group: "") and be included from the
@@ -228,6 +253,195 @@
         - name: Record TEST 4 failure
           ansible.builtin.set_fact:
             _test_failures: "{{ _test_failures + ['TEST 4: ' ~ (ansible_failed_result.msg | default('unknown') | replace('\n', ' '))] }}"
+
+    # ========================================================================
+    # TEST 5: per-AZ volume groups. The plan must group by the volume group
+    # EACH HOST names, not by whichever host run_once happened to pick.
+    # ========================================================================
+    - name: 'TEST 5: per-host volume groups produce one plan entry per group'
+      block:
+        - name: Build the pairs the orchestrator reads out of hostvars
+          ansible.builtin.set_fact:
+            _t5_pairs:
+              - {host: node101, group: "tier0-az1", volumes: ["AZ1:node101::/nvme/tier0"]}
+              - {host: node102, group: "tier0-az1", volumes: ["AZ1:node102::/nvme/tier0"]}
+              - {host: node201, group: "tier0-az2", volumes: ["AZ2:node201::/nvme/tier0"]}
+              - {host: node202, group: "tier0-az2", volumes: ["AZ2:node202::/nvme/tier0"]}
+
+        - name: Resolve distinct groups exactly as volume_group_join.yml does
+          ansible.builtin.set_fact:
+            _t5_names: >-
+              {{ _t5_pairs | rejectattr('group', 'equalto', '')
+                 | map(attribute='group') | unique | sort | list }}
+
+        - name: Build the plan exactly as volume_group_join.yml does
+          ansible.builtin.set_fact:
+            _t5_plan: >-
+              {{ (_t5_plan | default([])) + [{
+                   'group': item,
+                   'volumes': (_t5_pairs | selectattr('group', 'equalto', item)
+                               | map(attribute='volumes') | map('list')
+                               | sum(start=[]) | unique | sort | list),
+                   'hosts': (_t5_pairs | selectattr('group', 'equalto', item)
+                             | map(attribute='host') | sort | list)
+                 }] }}
+          loop: "{{ _t5_names }}"
+
+        - name: Model the OLD behaviour — one scalar read from the run_once host
+          ansible.builtin.set_fact:
+            _t5_old_group: "{{ _t5_pairs[0].group }}"
+            _t5_old_volumes: >-
+              {{ _t5_pairs | map(attribute='volumes') | map('list')
+                 | sum(start=[]) | unique | sort | list }}
+
+        - name: 'TEST 5 ASSERT: each AZ joins its own group, nothing crosses over'
+          ansible.builtin.assert:
+            that:
+              - _t5_plan | length == 2
+              - "_t5_plan | map(attribute='group') | list == ['tier0-az1', 'tier0-az2']"
+              - "_t5_plan[0].volumes == ['AZ1:node101::/nvme/tier0', 'AZ1:node102::/nvme/tier0']"
+              - "_t5_plan[1].volumes == ['AZ2:node201::/nvme/tier0', 'AZ2:node202::/nvme/tier0']"
+              - "_t5_plan[0].hosts == ['node101', 'node102']"
+              # Every volume is placed exactly once, in exactly one group.
+              - "(_t5_plan | map(attribute='volumes') | map('length') | sum) == 4"
+              # The defect being pinned: the old single-scalar read sent all
+              # four volumes to whichever group the picked host named.
+              - _t5_old_volumes | length == 4
+              - _t5_old_group == 'tier0-az1'
+            fail_msg: |
+              REGRESSION: per-host volume groups are not honoured.
+              plan: {{ _t5_plan }}
+              A single `hammerspace_volume_group` read under run_once resolves
+              in ONE host's context, so a per-AZ configuration silently sent
+              every volume in the play to one group ({{ _t5_old_group }}).
+
+        - name: Record TEST 5 pass
+          ansible.builtin.set_fact:
+            _test_passes: "{{ _test_passes + ['TEST 5: per-AZ groups — one plan entry per group, volumes unioned per group, no cross-contamination'] }}"
+      rescue:
+        - name: Record TEST 5 failure
+          ansible.builtin.set_fact:
+            _test_failures: "{{ _test_failures + ['TEST 5: ' ~ (ansible_failed_result.msg | default('unknown') | replace('\n', ' '))] }}"
+
+    # ========================================================================
+    # TEST 6: the single-group case must be unchanged, an empty per-host value
+    # must fall back to the play value, and no host naming a group must yield
+    # an EMPTY plan — never a group named ''.
+    # ========================================================================
+    - name: 'TEST 6: single group, empty-value fallback, and the no-group case'
+      block:
+        - name: One group across every host
+          ansible.builtin.set_fact:
+            _t6_plan_single: >-
+              {{ (_t6_plan_single | default([])) + [{
+                   'group': item,
+                   'volumes': (_t6_pairs | selectattr('group', 'equalto', item)
+                               | map(attribute='volumes') | map('list')
+                               | sum(start=[]) | unique | sort | list)
+                 }] }}
+          loop: >-
+            {{ _t6_pairs | rejectattr('group', 'equalto', '')
+               | map(attribute='group') | unique | sort | list }}
+          vars:
+            _t6_pairs:
+              - {host: n1, group: "tier0-nvme", volumes: ["AZ1:n1::/nvme/tier0"]}
+              - {host: n2, group: "tier0-nvme", volumes: ["AZ1:n2::/nvme/tier0"]}
+
+        - name: An empty per-host value falls back to the play-level value
+          ansible.builtin.set_fact:
+            # `default(play_value, true)` — the second arg makes an EMPTY
+            # string fall back too, not just an undefined one.
+            _t6_fallback: "{{ '' | default('tier0-nvme', true) | trim }}"
+            _t6_explicit: "{{ 'tier0-az1' | default('tier0-nvme', true) | trim }}"
+
+        - name: Nobody names a group
+          ansible.builtin.set_fact:
+            _t6_names_none: >-
+              {{ [{'host': 'n1', 'group': '', 'volumes': ['v1']}]
+                 | rejectattr('group', 'equalto', '')
+                 | map(attribute='group') | unique | sort | list }}
+
+        - name: 'TEST 6 ASSERT: no behaviour change for the common cases'
+          ansible.builtin.assert:
+            that:
+              - _t6_plan_single | length == 1
+              - _t6_plan_single[0].group == 'tier0-nvme'
+              - "_t6_plan_single[0].volumes == ['AZ1:n1::/nvme/tier0', 'AZ1:n2::/nvme/tier0']"
+              - _t6_fallback == 'tier0-nvme'
+              - _t6_explicit == 'tier0-az1'
+              # An empty value must never produce a group named ''.
+              - _t6_names_none == []
+            fail_msg: |
+              REGRESSION in the single-group / no-group path.
+              single: {{ _t6_plan_single }}
+              fallback: {{ _t6_fallback }} / explicit: {{ _t6_explicit }}
+              none: {{ _t6_names_none }} (expected [])
+              An empty hammerspace_volume_group must skip the join entirely,
+              never GET /volume-groups/ and fail on a group named ''.
+
+        - name: Record TEST 6 pass
+          ansible.builtin.set_fact:
+            _test_passes: "{{ _test_passes + ['TEST 6: one group → one union write; empty per-host value falls back to the play value; no group named → empty plan'] }}"
+      rescue:
+        - name: Record TEST 6 failure
+          ansible.builtin.set_fact:
+            _test_failures: "{{ _test_failures + ['TEST 6: ' ~ (ansible_failed_result.msg | default('unknown') | replace('\n', ' '))] }}"
+
+    # ========================================================================
+    # TEST 7 (audit): the orchestrator/body split, the fact reset, and the
+    # share-objective ambiguity guard.
+    # ========================================================================
+    - name: 'TEST 7: audit the group-aware split and the placement guard'
+      block:
+        - name: Read the files
+          ansible.builtin.slurp:
+            src: "{{ item }}"
+          loop:
+            - "{{ playbook_dir }}/../../roles/hammerspace_integration/tasks/tier0_place_on_group.yml"
+          register: _t7_src
+
+        - name: Decode
+          ansible.builtin.set_fact:
+            _t7_po: "{{ _t7_src.results[0].content | b64decode }}"
+
+        - name: 'TEST 7 ASSERT: split, reset, loop_var, and the guard'
+          vars:
+            # A needle holding {{ }} is templated before assert sees it.
+            _t7_plan_loop: '{% raw %}loop: "{{ _vg_plan }}"{% endraw %}'
+          ansible.builtin.assert:
+            that:
+              # One include per distinct group, carrying the group in loop_var.
+              - "'include_tasks: volume_group_join_one.yml' in _vgj_orch"
+              - "'loop_var: _vgj' in _vgj_orch"
+              - _t7_plan_loop in _vgj_orch
+              # set_fact persists across loop iterations AND across the plays
+              # hammerspace_serial creates, so the plan and the per-group facts
+              # must be reset, never accumulated from a previous batch.
+              - "'_vg_pairs: []' in _vgj_orch"
+              - "'_vg_plan: []' in _vgj_orch"
+              - "'Reset the per-group facts' in _vgj_one"
+              # The guard: a share objective can name only one group.
+              - "'_t0po_groups' in _t7_po"
+              - "'_t0po_groups | length > 1' in _t7_po"
+              - "'ansible.builtin.fail' in _t7_po"
+              # ...and it must be escapable by naming the objective explicitly,
+              # or a legitimate multi-AZ run could never apply any objective.
+              - "'hammerspace_tier0_place_on_objective' in _t7_po"
+            fail_msg: |
+              REGRESSION in the group-aware join or the placement guard. Required:
+                volume_group_join.yml: includes volume_group_join_one.yml in a
+                  loop with loop_var _vgj; resets _vg_pairs and _vg_plan
+                volume_group_join_one.yml: resets its per-group facts
+                tier0_place_on_group.yml: hard failure when the run names more
+                  than one group, with an explicit-objective escape
+
+        - name: Record TEST 7 pass
+          ansible.builtin.set_fact:
+            _test_passes: "{{ _test_passes + ['TEST 7: audit — per-group include with loop_var, plan + per-group facts reset, share-objective ambiguity guard with an escape'] }}"
+      rescue:
+        - name: Record TEST 7 failure
+          ansible.builtin.set_fact:
+            _test_failures: "{{ _test_failures + ['TEST 7: ' ~ (ansible_failed_result.msg | default('unknown') | replace('\n', ' '))] }}"
 
     # ========================================================================
     # Report

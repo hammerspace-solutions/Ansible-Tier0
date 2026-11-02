@@ -58,6 +58,47 @@
         - (hammerspace_volume_group | default('')) | length == 0
         - (hammerspace_tier0_place_on_objective | default('')) | length == 0
 
+    # THE GUARD.
+    #
+    # The objective name is derived from ONE group, and the shares are
+    # cluster-wide, so "which group" has a single answer here. The join step,
+    # by contrast, legitimately handles several (per-AZ group_vars). When the
+    # run names more than one group, applying place-on-<first> to the share
+    # would confine the share to one AZ's volumes and silently exclude the
+    # rest — so this is a hard failure that names the groups it saw.
+    - name: Resolve the volume groups this run's hosts name
+      ansible.builtin.set_fact:
+        _t0po_groups: >-
+          {{ ansible_play_hosts
+             | map('extract', hostvars, 'hammerspace_volume_group')
+             | select('defined') | map('string') | map('trim')
+             | reject('equalto', '') | unique | sort | list }}
+
+    - name: Fail if this run names more than one volume group
+      ansible.builtin.fail:
+        msg: |
+          This run names {{ _t0po_groups | length }} volume groups
+          ({{ _t0po_groups | join(', ') }}), so place-on-<group> is ambiguous:
+          a share objective is cluster-wide and can name only one.
+
+          The volumes themselves were joined to the right group each — that
+          part is per-host. It is only the SHARE objective that has to pick.
+
+          Either:
+            - name the objective explicitly, if one group is the intended
+              placement target for these shares:
+                hammerspace_tier0_place_on_objective: "place-on-{{ _t0po_groups | first }}"
+            - or apply an objective naming a group that CONTAINS them all (a
+              volume group may hold other volume groups — create an "all AZs"
+              group in the UI and use place-on-<that group>)
+            - or run one AZ at a time:
+                ansible-playbook site.yml --limit AZ1 \
+                  -e hammerspace_volume_group={{ _t0po_groups | first }} \
+                  -e hammerspace_tier0_place_on_group=true
+      when:
+        - _t0po_groups | length > 1
+        - (hammerspace_tier0_place_on_objective | default('')) | length == 0
+
     - name: Fail if there is no share to apply the objective to
       ansible.builtin.fail:
         msg: |

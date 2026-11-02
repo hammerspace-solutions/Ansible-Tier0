@@ -311,9 +311,18 @@
 # Append this run's volumes to a volume group that already exists. Runs once
 # for the whole play (single read-modify-write) — see the task file for why a
 # per-host update races and silently drops volumes.
+# Gated on ANY host naming a group, not on this host's value. The value may be
+# set per host or per inventory group, and the join itself is run_once — so a
+# gate that reads only the current host's value skips the whole step whenever
+# the host Ansible picks happens not to name one.
 - name: Add this run's volumes to an existing volume group
   ansible.builtin.include_tasks: volume_group_join.yml
-  when: (hammerspace_volume_group | default('')) | length > 0
+  when: >-
+    ((hammerspace_volume_group | default('')) | trim | length > 0)
+    or ((ansible_play_hosts
+         | map('extract', hostvars, 'hammerspace_volume_group')
+         | select('defined') | map('string') | map('trim')
+         | reject('equalto', '') | list | length) > 0)
 
 - name: Add volumes to existing volume groups
   ansible.builtin.include_tasks: volume_group_add_volume.yml

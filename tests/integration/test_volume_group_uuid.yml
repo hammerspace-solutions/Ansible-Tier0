@@ -42,8 +42,14 @@
   vars:
     _test_passes: []
     _test_failures: []
+    # The volume-group WRITERS. volume_group_join.yml is the orchestrator — it
+    # builds the per-group plan and issues no PUT of its own; the write body
+    # it includes once per group is volume_group_join_one.yml, so that is the
+    # file these audits must cover. TEST 1's count guard is what caught the
+    # move rather than letting the audits pass vacuously on a file with no
+    # PUT in it.
     _writers:
-      - roles/hammerspace_integration/tasks/volume_group_join.yml
+      - roles/hammerspace_integration/tasks/volume_group_join_one.yml
       - roles/hammerspace_integration/tasks/volume_group_leave.yml
       - roles/hammerspace_integration/tasks/volume_group_add_volume.yml
 

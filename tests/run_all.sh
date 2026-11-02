@@ -17,7 +17,17 @@ REPO_ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." &> /dev/null && pwd)"
 cd "${REPO_ROOT}"
 
 fail=0
+skipped=0
 report=()
+
+# A check that cannot run is recorded as SKIPPED and named in the summary.
+# It is neither a pass nor a failure: a silently skipped check is how
+# "All checks passed" comes to mean less than it says.
+skip() {
+    printf '\n=== %s ===\nSKIPPED: %s\n' "$1" "$2"
+    report+=("⊘ $1 — SKIPPED: $2")
+    skipped=$((skipped+1))
+}
 
 step() {
     local name="$1"; shift
@@ -40,7 +50,14 @@ yaml_sweep() {
                -not -path './.git/*' -not -path './payload/*')
     return $bad
 }
-step "YAML syntax (all *.yml / *.yaml)" yaml_sweep
+# PyYAML is a hard requirement for this sweep: without it every file reports
+# as broken and the step fails 150+ times for one missing import.
+if python3 -c "import yaml" >/dev/null 2>&1; then
+    step "YAML syntax (all *.yml / *.yaml)" yaml_sweep
+else
+    skip "YAML syntax (all *.yml / *.yaml)" \
+        "PyYAML not installed — pip3 install PyYAML (ansible-playbook --syntax-check in step E still parses site.yml, plays/ and tests/)"
+fi
 
 # -- B: bash syntax sweep -----------------------------------------------------
 bash_sweep() {
@@ -61,7 +78,8 @@ if command -v shellcheck >/dev/null 2>&1; then
                    tests/integration/test_scan_disks.sh \
                    tests/integration/test_python_compat.sh
 else
-    echo "skipping shellcheck (not installed)"
+    skip "shellcheck (scripts/, roles/*/files/, tests/integration/*.sh)" \
+        "shellcheck not installed — brew install shellcheck / apt install shellcheck"
 fi
 
 # -- D: yamllint (if available) ----------------------------------------------
@@ -85,7 +103,8 @@ if [[ -n "${YAMLLINT}" ]]; then
                  roles/hammerspace_integration/tasks/azure_imds_az.yml \
                  roles/perf_tuning/
 else
-    echo "skipping yamllint (not installed)"
+    skip "yamllint (plays/, scripts/, tests/, this-session role files)" \
+        "yamllint not installed — pip3 install yamllint"
 fi
 
 # -- E: ansible-playbook --syntax-check --------------------------------------
@@ -146,9 +165,15 @@ for line in "${report[@]}"; do
 done
 
 if [[ ${fail} -eq 0 ]]; then
-    printf '\nAll checks passed.\n'
+    if [[ ${skipped} -gt 0 ]]; then
+        printf '\nAll checks that ran passed — %d SKIPPED (see ⊘ above). This is NOT full coverage.\n' "${skipped}"
+    else
+        printf '\nAll checks passed.\n'
+    fi
     exit 0
 else
-    printf '\n%d check(s) failed.\n' "${fail}"
+    printf '\n%d check(s) failed' "${fail}"
+    [[ ${skipped} -gt 0 ]] && printf ', %d skipped' "${skipped}"
+    printf '.\n'
     exit 1
 fi
