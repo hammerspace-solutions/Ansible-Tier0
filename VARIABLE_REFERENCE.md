@@ -14,7 +14,7 @@ also be passed on the command line with `-e name=value`.
 
 | Variable | Set it to | Why |
 |----------|-----------|-----|
-| `hammerspace_api_host` | Your Anvil management IP | The one value every deployment needs. The NFS export list, network test and DI settings follow it automatically. |
+| `hammerspace_api_host` | Your Anvil management IP, via `-e hammerspace_api_host=<ip>` | The one value every deployment needs. Empty in `vars/main.yml`; the run stops immediately if it is not supplied. The NFS export list, network test and DI settings follow it automatically. |
 | `vault_hammerspace_api_password` | The admin password, in `vars/vault.yml` | Used for every API call. |
 | `client_subnets` | The subnets your NFS clients are on | Ships as `0.0.0.0/0`; narrow it before production. |
 | `hammerspace_nodes` | Extra Anvil / DSX IPs, if any | The Anvil is included already. Listed IPs get `no_root_squash`. |
@@ -105,7 +105,7 @@ Used when `use_dynamic_discovery: false`.
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `hammerspace_api_host` | *(set per site)* | Anvil management IP for API access. Set once; other settings derive from it. |
+| `hammerspace_api_host` | `""` *(required — pass with `-e`)* | Anvil management IP for API access. Empty by default so no site inherits another's cluster; the run fails at start, naming this variable, if it is empty. Set once; other settings derive from it. |
 | `hammerspace_api_user` | `"admin"` | API username (admin role required). |
 | `hammerspace_api_password` | `"{{ vault_hammerspace_api_password }}"` | API password. Sourced from Ansible Vault. |
 | `hammerspace_api_port` | `8443` | API port. |
@@ -275,7 +275,7 @@ prefix and `instance_report.csv`, so the three always agree.
 | `nfs_rdma_enabled` | `"y"` | Enable NFS over RDMA. |
 | `nfs_rdma_port` | `20049` | RDMA port. |
 | `hammerspace_nodes` | `["{{ hammerspace_api_host }}"]` | Anvil/DSX IPs requiring `no_root_squash`. Defaults to the primary Anvil (no duplication); add secondary Anvils/DSX IPs here. |
-| `mover_nodes` | `[]` | Mover/DI node IPs requiring `no_root_squash` — every data-path IP a DSX uses to reach the node. DI nodes in `di_nodes` are added automatically (`di_auto_export`). |
+| `mover_nodes` | `[]` | Mover/DI node IPs requiring `no_root_squash` — every data-path IP a DSX uses to reach the node. A list: pass it as `-e '{"mover_nodes": ["10.0.0.20"]}'` or in a `-e @file`. DI nodes in `di_nodes` are added automatically (`di_auto_export`). |
 | `client_subnets` | `["0.0.0.0/0"]` | Client subnets with `root_squash`. exports(5) matches by entry TYPE (single host > IP network > wildcard > netgroup > `*`), not line order; a second subnet after `0.0.0.0/0` is never matched. |
 | `hammerspace_export_opts` | `"rw,no_root_squash,sync,secure,mp,no_subtree_check"` | Export options for Hammerspace nodes. |
 | `client_export_opts` | `"rw,root_squash,sync,secure,mp,no_subtree_check"` | Export options for clients. |

@@ -120,12 +120,23 @@ ansible -i inventory.yml storage_servers -m ping     # every host should answer 
 
 ### 3. Point it at your Hammerspace cluster
 
-In `vars/main.yml` set the Anvil IP — once:
+Pass the Anvil IP on the command line — once. `vars/main.yml` leaves it empty
+on purpose, and the run stops immediately, naming the variable, if it is not set:
+
+```bash
+./scripts/run.sh playbook site.yml -i inventory.yml -e hammerspace_api_host=10.1.2.3
+```
+
+To keep it out of your command history, put site values in a file and pass
+`-e @site-overrides.yml`:
 
 ```yaml
 hammerspace_api_host: "10.1.2.3"
-hammerspace_api_user: "admin"
+mover_nodes: ["10.1.2.20", "10.1.2.21"]   # optional: data-mover / DSX data-path IPs
 ```
+
+The API user defaults to `admin`; change `hammerspace_api_user` in
+`vars/main.yml` if yours differs.
 
 Put the password in `vars/vault.yml` and encrypt the file:
 

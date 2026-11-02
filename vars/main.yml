@@ -364,8 +364,12 @@ cpu_optimized_raid: true
 # volumes with a Hammerspace cluster via the Anvil REST API.
 # Reference: https://github.com/hammer-space/ansible
 
-# Anvil management IP (public IP for API access)
-hammerspace_api_host: "10.0.10.15"
+# Anvil management IP (public IP for API access).
+# Intentionally EMPTY — every run must say which cluster it talks to, so a site
+# never inherits another site's Anvil. Supply it on the command line:
+#   -e hammerspace_api_host=<anvil-ip>        (or -e @site-overrides.yml)
+# The run fails immediately, naming this variable, if it is left empty.
+hammerspace_api_host: ""
 
 # API credentials (admin role required)
 hammerspace_api_user: "admin"

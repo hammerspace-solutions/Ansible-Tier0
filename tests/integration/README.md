@@ -497,6 +497,24 @@ auto-created `place-on-<group>`.
 Mutation-tested: dropping the status gate, one `run_once`, `failed_when`, the
 `!= 200` failure, or the empty-share failure each fails the relevant test.
 
+## `test_api_host_required.yml`
+
+`hammerspace_api_host` used to ship as one site's Anvil IP, so a site that
+forgot to override it silently talked to that cluster. It now ships empty and
+every play that talks to the Anvil includes
+`roles/hammerspace_integration/tasks/require_api_host.yml` first (before the
+Key Vault lookup), tagged `always` so `--tags` filtering cannot skip it.
+
+| # | Scenario | Expected |
+|---|----------|----------|
+| 1 | Raw `vars/main.yml` | `hammerspace_api_host: ""`; no IP literal default |
+| 2 | Gate run with `""`, `"   "`, `"10.0.0.10"` | Blank values fail with a message naming the variable; a real IP passes |
+| 3 | **Audit** eight plays | Each includes the gate, tagged `always`, ahead of the (last) `keyvault_password` include |
+
+Mutation-tested: restoring an IP default, removing the gate from `di.yml`,
+dropping the `always` tag, and weakening the length check each fail it.
+`_api_host_probe.yml` is its helper (no `test_` prefix, so the runner skips it).
+
 ## `test_nfs_exports_hardening.yml`
 
 2026-09-18 NFS field report follow-up. Pins the DI-export persistence bug

@@ -57,7 +57,8 @@ Before starting, ensure you have:
 | Locale (control host) | UTF-8 locale required. Non-English systems (e.g. Korean ko_KR) must `export LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8` before running Ansible, or use `./scripts/run.sh` which sets it automatically. |
 
 > **Two things that save time later.** You only set the Anvil IP once
-> (`hammerspace_api_host`); the NFS export list, the network test and the DI
+> (`hammerspace_api_host`, passed with `-e`; the run stops at once if it is
+> missing); the NFS export list, the network test and the DI
 > settings all follow it. And the playbook tests the Anvil connection and
 > credentials in its first 30 seconds, so a wrong password fails immediately
 > rather than after the RAID build.
@@ -272,13 +273,34 @@ deployment — everything else has a working default.
 
 ### 5.1 Hammerspace connection (required)
 
+Supply the Anvil management IP on the command line. It is empty in
+`vars/main.yml` on purpose, so a run never talks to a cluster you did not name:
+
+```bash
+./scripts/run.sh playbook site.yml -i inventory.yml -e hammerspace_api_host=10.241.0.105
+```
+
+For several values, or to keep them out of shell history, use a file:
+
+```bash
+./scripts/run.sh playbook site.yml -i inventory.yml -e @site-overrides.yml
+```
+
+```yaml
+# site-overrides.yml
+hammerspace_api_host: "10.241.0.105"          # Anvil management IP
+mover_nodes: ["10.241.0.20", "10.241.0.21"]   # optional: data-mover IPs (list)
+```
+
+`-e` values override `vars/main.yml`. The NFS export list, network test and DI
+settings all follow `hammerspace_api_host`. `mover_nodes` is a list, so pass it
+as JSON (`-e '{"mover_nodes": ["10.241.0.20"]}'`) or in the file, never as
+`-e mover_nodes=a,b`. If you override `hammerspace_nodes` (extra Anvil/DSX IPs),
+include the primary Anvil in it yourself.
+
 In `vars/main.yml`:
 
 ```yaml
-# Anvil management IP — set once; the NFS export list, network test and DI
-# settings all follow it
-hammerspace_api_host: "10.241.0.105"    # <-- your Anvil IP
-
 hammerspace_api_user: "admin"            # must have the admin role
 hammerspace_api_password: "{{ vault_hammerspace_api_password }}"   # leave as is
 
