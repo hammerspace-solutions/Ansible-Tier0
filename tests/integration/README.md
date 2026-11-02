@@ -527,19 +527,90 @@ current host each fails the relevant test.
 ## `test_api_body_redaction.yml`
 
 The Hammerspace API echoes the request headers inside some error bodies
-(`ENTITY_NOT_FOUND`, `errorCode 4002`, `"headers":"...authorization: Basic
-<base64 admin:password>..."`). The curl tasks are `no_log`, so the failure
-messages print the response body instead — and that body held the credential,
-which `scripts/run.sh` then wrote to `~/logs`. The old comment claimed the
-response "cannot contain the credential".
+(`ENTITY_NOT_FOUND`, `errorCode 4002`). The curl tasks are `no_log`, so the
+failure messages print the response body instead — and that body held the
+credential, which `scripts/run.sh` then wrote to `~/logs`. The old comment
+claimed the response "cannot contain the credential".
+
+**The first fix did not work.** It anchored on `authorization:` —
+
+```
+regex_replace('(?i)authorization:\s*Basic\s+[A-Za-z0-9+/=]+', ...)
+```
+
+— and this test fed it a fixture where `headers` was a *string* of header
+lines. It passed. A real Anvil emits `headers` as a JSON **object**:
+
+```
+"headers":{"host":"...","authorization":"Basic <b64>","content-type":...}
+```
+
+where `authorization` is followed by `":"`, not `:`. The pattern never
+matched, and the credential printed in full — it reached a screen-share
+before anyone noticed. The redaction is now **unanchored**: it matches
+`Basic <base64>` wherever it appears, whatever precedes it.
+
+> A redaction test must use a body captured from the real API. This one was
+> written from the same assumption as the redaction it was checking, so the
+> two agreed with each other and both were wrong.
 
 | # | Scenario | Expected |
 |---|----------|----------|
-| 1 | Real 404 body shape with a dummy credential, through the regex used at each site | Token gone, `authorization: Basic <redacted>` present, error code and other headers intact |
-| 2 | **Audit** every line printing `(empty response body)` in the role | Each carries the redaction; count guard (>= 4) so it cannot pass vacuously |
-| 3 | No comment says the response cannot contain the credential | Zero matches |
+| 1 | Dummy credential in **both** body shapes — JSON-object headers (from the field report) and header-line string — through the shared pattern | Token gone, `Basic <redacted>` present, error code and the volume name intact |
+| 2 | The **old anchored** pattern against the JSON-object shape | Still leaks — pinned, so re-anchoring cannot pass silently |
+| 3 | **Audit** every line printing `(empty response body)`, recursing into `cluster/` and `s3/` | Each carries the redaction; count guard (>= 4) so it cannot pass vacuously |
+| 4 | No comment says the response cannot contain the credential | Zero matches |
+| 5 | The anchored pattern appears nowhere in the role | Zero matches |
 
-Mutation-tested: un-redacting one site and restoring the false claim each fail it.
+Mutation-tested: re-anchoring one site, un-redacting one site, and restoring
+the false claim each fail it.
+
+## `test_volume_add_status.yml`
+
+A field run failed at the volume group PUT with
+
+```
+[{"errorCode":4002,"args":["storage volume","10.1.16.4::/nvme/tier0"],
+  "message":"ENTITY_NOT_FOUND", ...}]
+```
+
+The PUT was correct. It was the first task in the whole run that actually
+*checked* whether the volume existed — and it runs `run_once`, so it failed on
+whichever host Ansible picked rather than the host that built the name.
+
+`add_volume.yml` registered the POST result but read `.status` at exactly one
+place: to recognise the `400`/"already exists" case. Every other rejection
+(401, 403, 404, 409, 5xx, or curl never running at all — HTTP 0) fell through.
+The completion poll that should have caught it is gated on a `Location` header
+a rejected POST never returns, so the poll was **skipped rather than failed**.
+Both gates passed by being absent, and the task printed "added successfully".
+
+> The same shape as the `objective-set` silent success: an async API call has
+> **two** failure points — the request status and the task status — and "no
+> Location, so skip the poll" is how a rejected request becomes a silent
+> success.
+
+A second path reached the same place: the existence pre-check set
+`volume_already_exists` from HTTP status alone, so a `200` with a null body
+skipped the add entirely.
+
+| # | Scenario | Expected |
+|---|----------|----------|
+| 1 | POST status gate over 403 / 404 / 409 / 500 / HTTP 0 / 201 / 202 / already-exists | Fires on every rejection, silent on 2xx and on the reclassified already-exists |
+| 2 | 2xx with and without a `Location` | A 2xx with no Location **fails**; it must never skip the poll |
+| 3 | `volume_already_exists` from (200 + uuid), (200 + empty), (404) | Only the first is "exists" — a 200 alone is not proof |
+| 4 | **Audit** `add_volume.yml` for all four gates | Present; `>= 3` `fail` tasks as a count guard |
+| 5 | The verification GET | `check_mode: false`, `no_log: true`, skipped under `--check` |
+| 6 | Body prints in the file | Redacted, and the anchored pattern absent |
+| 7 | Gate ordering | The status gate precedes the poll, so a rejected add does not wait out the full retry budget first |
+
+Mutation-tested (5): dropping the status gate, dropping `no_log`, dropping
+`check_mode: false`, re-anchoring the redaction, and removing the post-add
+verification each fail it.
+
+Comment lines are stripped before the source audits run — this file explains
+the bug in prose, and an audit matching the explanation would pass on broken
+code.
 
 ## `test_api_host_required.yml`
 
@@ -668,6 +739,15 @@ scalar for that, or `regex_findall(..., multiline=True)`.
   `roles/nvme_discovery/tasks/detect_boot_device.yml`
 - After adding any playbook that talks to the Hammerspace API — it must load
   `vars/vault.yml` via `{{ repo_root }}` or the password is silently undefined
+- After any change to `roles/hammerspace_integration/tasks/add_volume.yml`,
+  especially to the existence pre-check, the POST status gate, the completion
+  poll, or the post-add verification — the name this file records in
+  `_hs_run_volume_names` is what the volume group join PUTs, and a name the
+  API cannot resolve fails far away on another host
+- After adding any task that prints an API response body in a failure message
+  — the Anvil echoes the `Authorization` header into some error bodies, and
+  the redaction must stay **unanchored** (`Basic <base64>`, not
+  `authorization: Basic ...`)
 
 Wire into pre-merge CI as `./tests/run_all.sh` — it runs every check in one
 command and exits non-zero on any failure.

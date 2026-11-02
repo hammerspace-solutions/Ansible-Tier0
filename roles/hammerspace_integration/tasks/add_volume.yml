@@ -109,9 +109,35 @@
       URL: {{ hs_api_url }}/storage-volumes/{{ volume_name | urlencode }}
   when: hammerspace_debug | default(false)
 
+# A 200 alone is NOT proof the volume exists. If the API answers 200 with a
+# null or non-object body, treating that as "already exists" SKIPS the add and
+# the play proceeds believing in a volume that was never created — the first
+# thing to notice is the volume group PUT, tens of tasks later, reporting
+# ENTITY_NOT_FOUND on a name this host chose. So require an object carrying a
+# uoid.uuid, which is what every real storage volume comes back with.
+- name: "Resolve the volume identity returned by the existence check"
+  ansible.builtin.set_fact:
+    _hs_vol_check_uuid: >-
+      {{ ((volume_check.json | default({}, true)).uoid.uuid | default('', true))
+         if ((volume_check.json | default({}, true)) is mapping) else '' }}
+
 - name: "Set volume exists flag"
   ansible.builtin.set_fact:
-    volume_already_exists: "{{ (volume_check.status | int) == 200 }}"
+    volume_already_exists: >-
+      {{ ((volume_check.status | int) == 200)
+         and ((_hs_vol_check_uuid | length) > 0) }}
+
+- name: "Warn when the existence check returned 200 without a volume object"
+  ansible.builtin.debug:
+    msg: >-
+      The existence check for '{{ volume_name }}' returned HTTP 200 but no
+      uoid.uuid, so it is NOT treated as an existing volume and the add will
+      be attempted. If the add then reports the volume already exists, the
+      API is answering 200 for a volume it will not describe — investigate
+      before re-running.
+  when:
+    - (volume_check.status | int) == 200
+    - (_hs_vol_check_uuid | length) == 0
 
 - name: "Add storage volume {{ volume_config.path }}"
   ansible.builtin.shell:
@@ -157,6 +183,63 @@
     - volume_add_result.status | default(0) | int == 400
     - "'already exists' in (volume_add_result.json | default({}) | string)"
 
+# The POST status was never checked. Only the 400/"already exists" case above
+# ever read it, so ANY other rejection — 401, 403, 404, 409, 500, or curl not
+# running at all (HTTP 0) — fell straight through to the completion poll, which
+# is itself gated on a Location header a rejected POST never returns. Both
+# gates therefore passed by being skipped, "added successfully" was printed,
+# and the run failed much later somewhere that had no idea which volume or
+# which host was at fault. This is the same shape as the objective-set silent
+# success (2026-09-18): an async API call has TWO failure points, the request
+# status and the task status, and both must be gated.
+- name: "Fail if adding volume {{ volume_config.path }} was rejected"
+  ansible.builtin.fail:
+    msg: |
+      Adding storage volume '{{ volume_name }}' failed
+      with HTTP {{ volume_add_result.status | default(0) | int }}
+      (curl exit {{ volume_add_raw.rc | default('unknown') }}).
+
+      POST {{ hs_api_url }}/storage-volumes
+
+      The API said:
+        {{ (volume_add_raw.stdout_lines | default([]))[:-1] | join('\n  ') | trim | regex_replace('(?i)Basic\s+[A-Za-z0-9+/=]{8,}', 'Basic <redacted>') | default('(empty response body)', true) }}
+
+      curl stderr:
+        {{ (volume_add_raw.stderr | default('') | regex_replace('Basic [A-Za-z0-9+/=]+', 'Basic <redacted>')) | trim | default('(none)', true) }}
+
+      The volume does NOT exist. Nothing downstream that references it —
+      volume group membership, placement objectives, shares — can succeed,
+      so the run stops here rather than failing later on a host that did
+      not create it.
+
+      HTTP 0 with an empty body means curl never ran at all; check the
+      stderr above and hs_api_url.
+  when:
+    - not ansible_check_mode
+    - not volume_already_exists
+    - volume_add_result is defined
+    - (volume_add_result.status | default(0) | int) not in [200, 201, 202, 204]
+
+# A 2xx with no Location is not success either: there is no task to poll, so
+# the add can neither be waited on nor verified through the task API. Fail
+# rather than skip — skipping is what made the rejection above invisible.
+- name: "Fail if the volume {{ volume_config.path }} add returned no task Location"
+  ansible.builtin.fail:
+    msg: |
+      Adding storage volume '{{ volume_name }}' returned
+      HTTP {{ volume_add_result.status | default(0) | int }} but no Location
+      header, so there is no task to wait on and no way to confirm the add
+      completed.
+
+      Response headers were read from:
+        /tmp/hs_volume_add_headers_{{ volume_name | hash('md5') }}.txt
+  when:
+    - not ansible_check_mode
+    - not volume_already_exists
+    - volume_add_result is defined
+    - (volume_add_result.status | default(0) | int) in [200, 201, 202, 204]
+    - (volume_add_result.location | default('') | length) == 0
+
 - name: "Wait for volume {{ volume_config.path }} add to complete"
   ansible.builtin.shell:
     cmd: >-
@@ -188,8 +271,84 @@
     - volume_add_status_raw.stdout is defined
     - (volume_add_status_raw.stdout | default('{}') | from_json).status | default('') in ["FAILED", "CANCELLED"]
 
+# The gates above catch a REJECTED add. They cannot catch an add the API
+# accepted and completed but which left no volume resolvable under the name
+# this host will hand to the volume group join — a name built from the AZ
+# prefix, hammerspace_node_name and the path, any of which can drift.
+#
+# So the last word is the API's, not ours: re-read the volume by the exact
+# name recorded in _hs_run_volume_names and require it to resolve. This is
+# the lesson from the decommission cascade (2026-09-03 h) — when something
+# else is supposed to guarantee a property, verify it rather than trust it.
+#
+# Skipped under --check: nothing was created, so a miss proves nothing.
+# check_mode: false on the GET anyway, because a check-mode skip would
+# register stdout: '' and the gate would read it as a 0.
+- name: "Reset the volume verification facts"
+  ansible.builtin.set_fact:
+    _hs_vol_verify:
+      status: 0
+      uuid: ""
+
+- name: "Verify volume {{ volume_config.path }} resolves by name"
+  ansible.builtin.shell:
+    cmd: >-
+      curl -s -w "\n%{http_code}" --max-time {{ hammerspace_api_curl_timeout | default(60) }}
+      {{ '' if (hammerspace_api_validate_certs | default(false)) else '-k' }}
+      -H "Authorization: Basic {{ (hammerspace_api_user ~ ':' ~ hammerspace_api_password) | b64encode }}"
+      "{{ hs_api_url }}/storage-volumes/{{ volume_name | urlencode }}"
+  register: _hs_vol_verify_raw
+  changed_when: false
+  failed_when: false
+  check_mode: false
+  no_log: true
+  when: not ansible_check_mode
+
+- name: "Parse the volume verification"
+  ansible.builtin.set_fact:
+    _hs_vol_verify:
+      status: "{{ (_hs_vol_verify_raw.stdout_lines | default(['0']))[-1] | default('0') | int }}"
+      uuid: >-
+        {{ ((_hs_vol_verify_json).uoid.uuid | default('', true))
+           if (_hs_vol_verify_json is mapping) else '' }}
+  vars:
+    _hs_vol_verify_json: >-
+      {{ ((_hs_vol_verify_raw.stdout_lines | default(['{}']))[:-1]
+          | join('\n') | trim | default('{}', true)) | from_json }}
+  when: not ansible_check_mode
+
+- name: "Fail if volume {{ volume_config.path }} does not resolve after the add"
+  ansible.builtin.fail:
+    msg: |
+      Storage volume '{{ volume_name }}' does not resolve
+      (HTTP {{ _hs_vol_verify.status | default(0) | int }}) even though the
+      add reported success{{ ' (volume reported as already existing)' if volume_already_exists else '' }}.
+
+      GET {{ hs_api_url }}/storage-volumes/{{ volume_name | urlencode }}
+
+      This host records that name in _hs_run_volume_names, which the volume
+      group join then PUTs into the group's locations. A name the API cannot
+      resolve is rejected there as
+        ENTITY_NOT_FOUND ["storage volume","{{ volume_name }}"]
+      on whichever host won run_once — far from the host that built it. The
+      run stops here instead, on the host that owns the volume.
+
+      The name is [AZ:]nodename::path and is built from:
+        AZ prefix:            '{{ _effective_az_prefix | default('') }}'
+        hammerspace_node_name '{{ hammerspace_node_name | default(inventory_hostname) }}'
+        volume_config.path    '{{ volume_config.path }}'
+
+      List what the cluster actually has:
+        curl -sk -u '{{ hammerspace_api_user }}:<password>' \
+          '{{ hs_api_url }}/storage-volumes' | jq -r '.[].name'
+  when:
+    - not ansible_check_mode
+    - (_hs_vol_verify.uuid | default('') | length) == 0
+
 - name: "Display volume {{ volume_config.path }} status"
   ansible.builtin.debug:
     msg: >-
       Volume '{{ volume_name }}'
-      {% if volume_already_exists %}already exists (skipped){% else %}added successfully{% endif %}
+      {% if ansible_check_mode %}would be added (check mode — not verified)
+      {% elif volume_already_exists %}already exists (skipped), verified present
+      {% else %}added successfully, verified present{% endif %}
