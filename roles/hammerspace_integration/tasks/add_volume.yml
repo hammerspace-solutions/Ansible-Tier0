@@ -83,38 +83,61 @@
     var: volume_payload
   when: hammerspace_debug | default(false)
 
+# Volumes are looked up by LISTING /storage-volumes and selecting by name —
+# never by GET /storage-volumes/<name>.
+#
+# A volume name is [AZ:]node::/path and always contains '/'. Jinja's
+# `urlencode` encodes ':' but leaves '/' alone, so the per-name URL became
+#
+#   /storage-volumes/10.1.16.4%3A%3A/nvme/tier0
+#
+# and the API read /nvme/tier0 as extra path segments: a guaranteed 404 for
+# every volume. The existence pre-check therefore NEVER found an existing
+# volume (re-runs survived only through the 400 "already exists"
+# reclassification below), and the post-add verification 404'd on a volume
+# that had just been created. The repo's Python scripts get this right with
+# quote(name, safe=''); listing sidesteps the question entirely, including
+# whether a given Anvil accepts an encoded slash at all.
 - name: "Check if volume {{ volume_config.path }} already exists"
   ansible.builtin.shell:
     cmd: >-
       curl -s -w "\n%{http_code}" --max-time 60
       {{ '' if (hammerspace_api_validate_certs | default(false)) else '-k' }}
       -H "Authorization: Basic {{ (hammerspace_api_user ~ ':' ~ hammerspace_api_password) | b64encode }}"
-      "{{ hs_api_url }}/storage-volumes/{{ volume_name | urlencode }}"
+      "{{ hs_api_url }}/storage-volumes"
   register: volume_check_raw
   changed_when: false
   failed_when: false
   check_mode: false
+  no_log: true
 
+# `json` is the ONE listed volume whose name matches, or {} — so the uuid
+# resolution below reads it exactly as it would a single-object GET.
 - name: "Parse volume check result"
   ansible.builtin.set_fact:
     volume_check:
       status: "{{ (volume_check_raw.stdout_lines | default(['0']))[-1] | default('0') | int }}"
-      json: "{{ ((volume_check_raw.stdout_lines | default(['{}']))[:-1] | join('\n') | trim | default('{}', true)) | from_json }}"
+      json: >-
+        {{ ((_vc_list | selectattr('name', 'defined')
+                      | selectattr('name', 'equalto', volume_name) | list
+             | first) | default({}, true))
+           if (_vc_list is sequence and _vc_list is not string
+               and _vc_list is not mapping) else {} }}
+  vars:
+    _vc_list: >-
+      {{ ((volume_check_raw.stdout_lines | default(['[]']))[:-1]
+          | join('\n') | trim | default('[]', true)) | from_json }}
 
 - name: "Debug volume check result"
   ansible.builtin.debug:
     msg: |
       Volume check for '{{ volume_name }}':
-      Status: {{ volume_check.status | default('undefined') }}
-      URL: {{ hs_api_url }}/storage-volumes/{{ volume_name | urlencode }}
+      List status: {{ volume_check.status | default('undefined') }}
+      Found:       {{ (volume_check.json | default({})) | length > 0 }}
   when: hammerspace_debug | default(false)
 
-# A 200 alone is NOT proof the volume exists. If the API answers 200 with a
-# null or non-object body, treating that as "already exists" SKIPS the add and
-# the play proceeds believing in a volume that was never created — the first
-# thing to notice is the volume group PUT, tens of tasks later, reporting
-# ENTITY_NOT_FOUND on a name this host chose. So require an object carrying a
-# uoid.uuid, which is what every real storage volume comes back with.
+# Exists = the list call succeeded AND it contained this name with a
+# uoid.uuid. A 200 on its own only means the list was readable.
 - name: "Resolve the volume identity returned by the existence check"
   ansible.builtin.set_fact:
     _hs_vol_check_uuid: >-
@@ -126,18 +149,6 @@
     volume_already_exists: >-
       {{ ((volume_check.status | int) == 200)
          and ((_hs_vol_check_uuid | length) > 0) }}
-
-- name: "Warn when the existence check returned 200 without a volume object"
-  ansible.builtin.debug:
-    msg: >-
-      The existence check for '{{ volume_name }}' returned HTTP 200 but no
-      uoid.uuid, so it is NOT treated as an existing volume and the add will
-      be attempted. If the add then reports the volume already exists, the
-      API is answering 200 for a volume it will not describe — investigate
-      before re-running.
-  when:
-    - (volume_check.status | int) == 200
-    - (_hs_vol_check_uuid | length) == 0
 
 - name: "Add storage volume {{ volume_config.path }}"
   ansible.builtin.shell:
@@ -289,14 +300,15 @@
     _hs_vol_verify:
       status: 0
       uuid: ""
+      on_node: []
 
-- name: "Verify volume {{ volume_config.path }} resolves by name"
+- name: "Verify volume {{ volume_config.path }} is listed by the cluster"
   ansible.builtin.shell:
     cmd: >-
       curl -s -w "\n%{http_code}" --max-time {{ hammerspace_api_curl_timeout | default(60) }}
       {{ '' if (hammerspace_api_validate_certs | default(false)) else '-k' }}
       -H "Authorization: Basic {{ (hammerspace_api_user ~ ':' ~ hammerspace_api_password) | b64encode }}"
-      "{{ hs_api_url }}/storage-volumes/{{ volume_name | urlencode }}"
+      "{{ hs_api_url }}/storage-volumes"
   register: _hs_vol_verify_raw
   changed_when: false
   failed_when: false
@@ -304,27 +316,52 @@
   no_log: true
   when: not ansible_check_mode
 
+# Listed, not fetched by name — see the existence check above for why a
+# per-name URL can never resolve. `on_node` is every listed name for this
+# node, printed on failure so a name that drifted is visible next to the
+# one we expected.
 - name: "Parse the volume verification"
   ansible.builtin.set_fact:
     _hs_vol_verify:
       status: "{{ (_hs_vol_verify_raw.stdout_lines | default(['0']))[-1] | default('0') | int }}"
       uuid: >-
-        {{ ((_hs_vol_verify_json).uoid.uuid | default('', true))
-           if (_hs_vol_verify_json is mapping) else '' }}
+        {{ ((_hs_vol_match).uoid.uuid | default('', true))
+           if (_hs_vol_match is mapping) else '' }}
+      on_node: >-
+        {{ (_hs_vol_list | selectattr('name', 'defined') | map(attribute='name')
+            | select('search', '(^|:)' ~ (node_name | regex_escape) ~ '::')
+            | list) if _hs_vol_is_list else [] }}
   vars:
-    _hs_vol_verify_json: >-
-      {{ ((_hs_vol_verify_raw.stdout_lines | default(['{}']))[:-1]
-          | join('\n') | trim | default('{}', true)) | from_json }}
+    _hs_vol_list: >-
+      {{ ((_hs_vol_verify_raw.stdout_lines | default(['[]']))[:-1]
+          | join('\n') | trim | default('[]', true)) | from_json }}
+    _hs_vol_is_list: >-
+      {{ _hs_vol_list is sequence and _hs_vol_list is not string
+         and _hs_vol_list is not mapping }}
+    _hs_vol_match: >-
+      {{ ((_hs_vol_list | selectattr('name', 'defined')
+                        | selectattr('name', 'equalto', volume_name) | list
+           | first) | default({}, true)) if _hs_vol_is_list else {} }}
   when: not ansible_check_mode
 
-- name: "Fail if volume {{ volume_config.path }} does not resolve after the add"
+- name: "Fail if volume {{ volume_config.path }} is not listed after the add"
   ansible.builtin.fail:
     msg: |
-      Storage volume '{{ volume_name }}' does not resolve
-      (HTTP {{ _hs_vol_verify.status | default(0) | int }}) even though the
-      add reported success{{ ' (volume reported as already existing)' if volume_already_exists else '' }}.
+      Storage volume '{{ volume_name }}' is not in the cluster's volume
+      list even though the add reported success{{ ' (volume reported as already existing)' if volume_already_exists else '' }}.
 
-      GET {{ hs_api_url }}/storage-volumes/{{ volume_name | urlencode }}
+      GET {{ hs_api_url }}/storage-volumes -> HTTP {{ _hs_vol_verify.status | default(0) | int }}
+      {% if (_hs_vol_verify.status | default(0) | int) != 200 %}
+      The LIST call itself failed, so this proves nothing about the volume —
+      check the API is reachable and the credentials are valid.
+      {% else %}
+      Volumes the cluster lists for node '{{ node_name }}':
+      {% for n in _hs_vol_verify.on_node | default([]) %}
+        - {{ n }}
+      {% else %}
+        (none)
+      {% endfor %}
+      {% endif %}
 
       This host records that name in _hs_run_volume_names, which the volume
       group join then PUTs into the group's locations. A name the API cannot

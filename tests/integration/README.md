@@ -603,10 +603,24 @@ skipped the add entirely.
 | 5 | The verification GET | `check_mode: false`, `no_log: true`, skipped under `--check` |
 | 6 | Body prints in the file | Redacted, and the anchored pattern absent |
 | 7 | Gate ordering | The status gate precedes the poll, so a rejected add does not wait out the full retry budget first |
+| 8 | `urlencode` on the field-report volume name, plus an audit of the file | Produces `10.1.16.4%3A%3A/nvme/tier0` (slashes NOT encoded); no `storage-volumes/{{...}}` URL remains; both lookups list `/storage-volumes` |
+| 9 | List-and-select over: volume present, absent, an unnamed entry, an error object, an empty list | Finds the uuid only on an exact name; the per-node listing keeps `10.1.16.40::...` out of `10.1.16.4`'s |
 
-Mutation-tested (5): dropping the status gate, dropping `no_log`, dropping
-`check_mode: false`, re-anchoring the redaction, and removing the post-add
-verification each fail it.
+**Follow-up (rule 5).** Once the Anvil could reach the node, the add
+succeeded and the post-add verification 404'd on a volume the Anvil UI
+showed as present. A volume name always contains `/`, and Jinja's
+`urlencode` encodes `:` but **not** `/`, so `GET /storage-volumes/<name>`
+became `.../storage-volumes/10.1.16.4%3A%3A/nvme/tier0` and the API read
+`/nvme/tier0` as extra path segments. That lookup had **always** 404'd —
+the existence pre-check never once found an existing volume, and re-runs
+survived only on the 400 "already exists" reclassification. Both lookups now
+list `/storage-volumes` and select by name, which also avoids depending on
+whether a given Anvil accepts `%2F` in a path.
+
+Mutation-tested (9): dropping the status gate, dropping `no_log`, dropping
+`check_mode: false`, re-anchoring the redaction, removing the post-add
+verification, reverting either lookup to a per-name URL, dropping the `::`
+node anchor, and loosening the exact-name match each fail it.
 
 Comment lines are stripped before the source audits run — this file explains
 the bug in prose, and an audit matching the explanation would pass on broken

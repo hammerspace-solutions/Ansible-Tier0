@@ -37,8 +37,30 @@
 #   1. A non-2xx POST status fails the play (except the known already-exists).
 #   2. A 2xx with no Location fails; it must never skip the poll silently.
 #   3. volume_already_exists requires a resolvable object, not just HTTP 200.
-#   4. The volume is re-read by name and must resolve before the role moves
-#      on — the name in _hs_run_volume_names is what the group join PUTs.
+#   4. The volume is re-read and must be present before the role moves on —
+#      the name in _hs_run_volume_names is what the group join PUTs.
+#   5. Volumes are found by LISTING /storage-volumes, never by
+#      GET /storage-volumes/<name>.
+#
+# RULE 5 — THE FOLLOW-UP FIELD REPORT (2026-11-03)
+# ------------------------------------------------
+# Once an Azure NSG rule let the Anvil reach the node, the add succeeded and
+# the verification from rule 4 failed with HTTP 404 on
+#
+#   GET .../storage-volumes/10.1.16.4%3A%3A/nvme/tier0
+#
+# — on a volume the Anvil UI showed as present. A volume name always contains
+# '/', and Jinja's `urlencode` encodes ':' but NOT '/', so the API read
+# /nvme/tier0 as extra path segments. Every per-name lookup in this file had
+# always 404'd: the existence pre-check never once found an existing volume
+# (re-runs survived on the 400 "already exists" reclassification), and the
+# verification added on 2026-11-02 inherited the same URL. The repo's Python
+# scripts use quote(name, safe=''). Listing removes the encoding question,
+# including whether a given Anvil accepts %2F in a path at all.
+#
+# TEST 8 pins the Jinja behaviour against the exact URL from the field
+# report; TEST 9 pins the list-and-select logic, including the
+# 10.1.16.4 / 10.1.16.40 prefix trap in the per-node listing.
 #
 # Usage:
 #   ansible-playbook tests/integration/test_volume_add_status.yml -i localhost, -c local
@@ -188,7 +210,7 @@
           - "'_hs_vol_check_uuid' in _code"
           # Gate 4 — post-add verification by name.
           - "'_hs_vol_verify' in _code"
-          - "_code is search('does not resolve after the add')"
+          - "_code is search('is not listed after the add')"
           # Three fail tasks minimum: rejected, no-Location, does-not-resolve.
           - (_code | regex_findall('ansible\\.builtin\\.fail') | length) >= 3
         fail_msg: "add_volume.yml is missing a gate — see the header of this file"
@@ -262,6 +284,88 @@
           waits out the full retry budget first.
         quiet: true
 
+    # ---------------------------------------------------------------- TEST 8
+    # Real Jinja behaviour, checked against the URL the field run produced —
+    # not against my expectation of what urlencode does.
+    - name: 'TEST 8: urlencode leaves "/" in a volume name, so per-name URLs cannot work'
+      ansible.builtin.assert:
+        that:
+          - ('10.1.16.4::/nvme/tier0' | urlencode) == '10.1.16.4%3A%3A/nvme/tier0'
+          - "'/' in ('10.1.16.4::/nvme/tier0' | urlencode)"
+          # \{\{ so the needle is never itself templated.
+          - (_code | regex_findall('storage-volumes/\{\{') | length) == 0
+          - (_code | regex_findall('/storage-volumes"') | length) >= 2
+          # TEST 9 reproduces the selection logic, so it cannot see the file
+          # drift. These tie the file to what TEST 9 exercises: exact-name
+          # selection at both lookups, and the '::' anchor that keeps a
+          # 10.1.16.40 volume out of 10.1.16.4's listing.
+          - (_code | regex_findall("selectattr\\('name', 'equalto', volume_name\\)") | length) >= 2
+          - "\"(node_name | regex_escape) ~ '::'\" in _code"
+        fail_msg: >-
+          add_volume.yml addresses a storage volume by name in the URL path.
+          Volume names contain '/', which urlencode does not encode — list
+          /storage-volumes and select by name instead.
+        quiet: true
+
+    # ---------------------------------------------------------------- TEST 9
+    # The selection logic, verbatim from add_volume.yml, over the bodies the
+    # list call can return.
+    - name: 'TEST 9: list-and-select finds the volume, and only on its own node'
+      vars:
+        volume_name: "10.1.16.4::/nvme/tier0"
+        node_name: "10.1.16.4"
+        _is_list: >-
+          {{ item.body is sequence and item.body is not string
+             and item.body is not mapping }}
+        _match: >-
+          {{ ((item.body | selectattr('name', 'defined')
+                         | selectattr('name', 'equalto', volume_name) | list
+              | first) | default({}, true)) if _is_list else {} }}
+        _uuid: >-
+          {{ ((_match).uoid.uuid | default('', true))
+             if (_match is mapping) else '' }}
+        _on_node: >-
+          {{ (item.body | selectattr('name', 'defined') | map(attribute='name')
+              | select('search', '(^|:)' ~ (node_name | regex_escape) ~ '::')
+              | list) if _is_list else [] }}
+      ansible.builtin.assert:
+        that:
+          - _uuid == item.expect_uuid
+          - (_on_node | sort) == (item.expect_on_node | sort)
+        fail_msg: >-
+          {{ item.name }}: uuid={{ _uuid }} on_node={{ _on_node }},
+          expected {{ item.expect_uuid }} / {{ item.expect_on_node }}
+        quiet: true
+      loop:
+        - name: "present among others"
+          body:
+            - {name: "10.1.16.5::/nvme/tier0", uoid: {uuid: "u-5"}}
+            - {name: "10.1.16.4::/nvme/tier0", uoid: {uuid: "u-4"}}
+          expect_uuid: "u-4"
+          expect_on_node: ["10.1.16.4::/nvme/tier0"]
+        - name: "absent; a 10.1.16.40 volume must NOT count as this node's"
+          body:
+            - {name: "10.1.16.40::/nvme/tier0", uoid: {uuid: "u-40"}}
+            - {name: "AZ1:10.1.16.4::/nvme/other", uoid: {uuid: "u-x"}}
+          expect_uuid: ""
+          expect_on_node: ["AZ1:10.1.16.4::/nvme/other"]
+        - name: "an entry with no name is skipped, not fatal"
+          body:
+            - {_type: "STORAGE_VOLUME"}
+            - {name: "10.1.16.4::/nvme/tier0", uoid: {uuid: "u-4"}}
+          expect_uuid: "u-4"
+          expect_on_node: ["10.1.16.4::/nvme/tier0"]
+        - name: "error object instead of a list (e.g. a 401 body)"
+          body: {errorCode: 4001, message: "UNAUTHORIZED"}
+          expect_uuid: ""
+          expect_on_node: []
+        - name: "empty list"
+          body: []
+          expect_uuid: ""
+          expect_on_node: []
+      loop_control:
+        label: "{{ item.name }}"
+
     - name: PASSED
       ansible.builtin.debug:
-        msg: "test_volume_add_status PASSED (7 tests)"
+        msg: "test_volume_add_status PASSED (9 tests)"
