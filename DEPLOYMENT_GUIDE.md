@@ -1064,7 +1064,7 @@ anvil> node-list --name mover101
 ### 11.8 Decommission DI Nodes
 
 ```bash
-# Dry run first
+# Dry run first — sends nothing to Hammerspace, reports what it would do
 ansible-playbook decommission_di.yml -i inventory.yml --limit "mover101" --check
 
 # Execute (runs serial: 1 — one node at a time)
@@ -1073,9 +1073,14 @@ ansible-playbook decommission_di.yml -i inventory.yml --limit "mover101"
 
 The decommission playbook:
 1. Evacuates data from volumes (configurable via `di_decommission_evacuate_data`)
-2. Deletes volumes from Hammerspace
+   and waits for each evacuation to finish
+2. Deletes volumes from Hammerspace and confirms each one is gone
 3. Removes the node from the cluster
 4. Stops pd-di services on the host (skipped in k8s mode)
+
+If Hammerspace rejects any of steps 1–3, the run stops at that step and the
+node stays registered — a volume is never deleted before its data has been
+evacuated, and the node is never removed while one of its volumes remains.
 
 In k8s mode the decommission also (BEFORE the API teardown):
 - Removes the `hammerspace.io/di-status` + `hammerspace.io/di` labels from

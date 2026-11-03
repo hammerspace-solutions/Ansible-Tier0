@@ -558,7 +558,7 @@ before anyone noticed. The redaction is now **unanchored**: it matches
 |---|----------|----------|
 | 1 | Dummy credential in **both** body shapes — JSON-object headers (from the field report) and header-line string — through the shared pattern | Token gone, `Basic <redacted>` present, error code and the volume name intact |
 | 2 | The **old anchored** pattern against the JSON-object shape | Still leaks — pinned, so re-anchoring cannot pass silently |
-| 3 | **Audit** every line printing `(empty response body)`, recursing into `cluster/` and `s3/` | Each carries the redaction; count guard (>= 4) so it cannot pass vacuously |
+| 3 | **Audit** every line printing `(empty response body)` in `roles/hammerspace_integration` (recursing into `cluster/` and `s3/`) and `roles/di` | Each carries the redaction; count guard (>= 4) so it cannot pass vacuously |
 | 4 | No comment says the response cannot contain the credential | Zero matches |
 | 5 | The anchored pattern appears nowhere in the role | Zero matches |
 
@@ -625,6 +625,46 @@ node anchor, and loosening the exact-name match each fail it.
 Comment lines are stripped before the source audits run — this file explains
 the bug in prose, and an audit matching the explanation would pass on broken
 code.
+
+## `test_di_decommission_volume.yml`
+
+Three defects in `roles/di/tasks/decommission_volume.yml` and the node
+removal in `decommission.yml`, found by applying the `add_volume.yml`
+per-name URL finding to the rest of the repo.
+
+1. **Addressing.** Both requests used
+   `/storage-volumes/{{ _volume.name | urlencode }}`. A volume name contains
+   `/`, which `urlencode` does not encode, so every call 404'd. The volume is
+   now addressed by `uoid.uuid`, falling back to the name with `/` encoded as
+   `%2F` (what the Python scripts do with `quote(name, safe='')`).
+2. **Silent failure.** Neither request's status was read. A 404 has no
+   `Location`, so both polls were skipped and the file printed "removed
+   successfully" for a volume nothing touched — then `decommission.yml`
+   deleted the node, without the evacuation ever having run.
+3. **Dry run was not dry.** `roles/di/tasks/_api_request.yml` runs curl with
+   `check_mode: false` (its GETs must run under `--check`), and nothing gated
+   the writes. `--check` — which both the deployment guide and the DI guide
+   recommend as a preview — **deleted the DI node for real**. It did not also
+   decommission the volumes only because defect 1 made those calls 404, so
+   fixing defect 1 alone would have made `--check` more destructive.
+
+| # | Scenario | Expected |
+|---|----------|----------|
+| 1 | Addressing over: uuid present, no `uoid`, empty uuid (AZ-prefixed name) | uuid when present; otherwise the name with `:` and `/` both encoded; never a raw `/` |
+| 2 | **Audit** the request URLs | No `storage-volumes/{{ _volume...` URL; exactly two request URLs via `_dv_id` |
+| 3 | **Audit** the gates | Status gates on both requests, a fail on a decommission with no task `Location` (evacuation cannot be waited on), `!= 'COMPLETED'` on both polls, post-removal verification that fails closed, and no unconditional "removed successfully" |
+| 4 | Verification predicate over: gone, still listed, list call failed, 200 with an error object, empty list | Blocks the node delete whenever it cannot positively confirm the volume is gone |
+| 5 | **Audit** every POST/PUT/PATCH/DELETE through the DI request helper | Exactly 3, each after a `when: not ansible_check_mode` gate, each with a check-mode "would …" message |
+
+TEST 5's count guard is deliberate: a new write anywhere in `roles/di` fails
+it until it is gated and the expected count is updated.
+
+Mutation-tested (6): reverting the URL, dropping the decommission status gate,
+making the verification fail open, dropping the no-`Location` gate, and
+removing the check-mode gate on the volume writes or on the node DELETE each
+fail it. The first run caught only 4 of 6 — TEST 4 reproduces the predicate,
+so it cannot see the file drift, and TEST 3 matched task names that survive a
+weakened `when:`. The conditions themselves are now pinned.
 
 ## `test_api_host_required.yml`
 
@@ -758,6 +798,10 @@ scalar for that, or `regex_findall(..., multiline=True)`.
   poll, or the post-add verification — the name this file records in
   `_hs_run_volume_names` is what the volume group join PUTs, and a name the
   API cannot resolve fails far away on another host
+- After any change to `roles/di/tasks/decommission_volume.yml`,
+  `roles/di/tasks/decommission.yml`, or any new POST/PUT/DELETE through
+  `roles/di/tasks/_api_request.yml` — that helper ignores `--check`, so every
+  write must be gated by its caller
 - After adding any task that prints an API response body in a failure message
   — the Anvil echoes the `Authorization` header into some error bodies, and
   the redaction must stay **unanchored** (`Basic <base64>`, not

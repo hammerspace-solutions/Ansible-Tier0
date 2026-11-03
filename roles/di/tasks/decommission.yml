@@ -87,37 +87,51 @@
       when: _node_volumes | length > 0
 
     # Remove node from Hammerspace (by UUID if available, fall back to name)
-    - name: "Remove DI node from Hammerspace ({{ 'by UUID' if _di_node_uuid | length > 0 else 'by name' }})"
-      ansible.builtin.include_tasks: _api_request.yml
-      vars:
-        _api_request_url: "{{ _hs_api_base }}/nodes/{{ _di_node_uuid if _di_node_uuid | length > 0 else (_di_node_name | urlencode) }}"
-        _api_request_method: DELETE
-        _api_request_save_headers: true
-
-    - name: Check node removal result
+    #
+    # _api_request.yml runs its curl with check_mode: false (its GETs must run
+    # under --check), so an ungated DELETE here removed the node for real on a
+    # dry run. Writes are skipped under --check and reported instead.
+    - name: "Would remove DI node '{{ _di_node_name }}' (check mode)"
       ansible.builtin.debug:
         msg: >-
-          Node '{{ _di_node_name }}' removal:
-          {{ 'SUCCESS' if (_api_response.status | int) in [200, 202, 204]
-          else 'FAILED (HTTP ' ~ _api_response.status ~ ')' }}.
-          DELETE URL: /nodes/{{ _di_node_uuid if _di_node_uuid | length > 0 else _di_node_name }}
+          --check: would DELETE /nodes/{{ _di_node_uuid if _di_node_uuid | length > 0 else _di_node_name }}.
+          Nothing was sent.
+      when: ansible_check_mode
 
-    - name: Fail if node removal failed
-      ansible.builtin.fail:
-        msg: >-
-          Failed to remove DI node '{{ _di_node_name }}' from Hammerspace
-          (HTTP {{ _api_response.status }}). Check the Anvil logs or remove manually:
-          anvil> node-delete --name {{ _di_node_name }}
-      when: (_api_response.status | int) not in [200, 202, 204, 404]
+    - name: Remove DI node from Hammerspace
+      when: not ansible_check_mode
+      block:
+        - name: "Remove DI node from Hammerspace ({{ 'by UUID' if _di_node_uuid | length > 0 else 'by name' }})"
+          ansible.builtin.include_tasks: _api_request.yml
+          vars:
+            _api_request_url: "{{ _hs_api_base }}/nodes/{{ _di_node_uuid if _di_node_uuid | length > 0 else (_di_node_name | urlencode) }}"
+            _api_request_method: DELETE
+            _api_request_save_headers: true
 
-    # Poll for node removal task completion if async
-    - name: Poll node removal task
-      ansible.builtin.include_tasks: _api_poll_task.yml
-      vars:
-        _api_poll_url: "{{ _api_response.location }}"
-        _api_poll_retries: "{{ di_decommission_poll_retries | default(30) }}"
-        _api_poll_delay: "{{ di_decommission_poll_delay | default(10) }}"
-      when: _api_response.location | default('') | length > 0
+        - name: Check node removal result
+          ansible.builtin.debug:
+            msg: >-
+              Node '{{ _di_node_name }}' removal:
+              {{ 'SUCCESS' if (_api_response.status | int) in [200, 202, 204]
+              else 'FAILED (HTTP ' ~ _api_response.status ~ ')' }}.
+              DELETE URL: /nodes/{{ _di_node_uuid if _di_node_uuid | length > 0 else _di_node_name }}
+
+        - name: Fail if node removal failed
+          ansible.builtin.fail:
+            msg: >-
+              Failed to remove DI node '{{ _di_node_name }}' from Hammerspace
+              (HTTP {{ _api_response.status }}). Check the Anvil logs or remove manually:
+              anvil> node-delete --name {{ _di_node_name }}
+          when: (_api_response.status | int) not in [200, 202, 204, 404]
+
+        # Poll for node removal task completion if async
+        - name: Poll node removal task
+          ansible.builtin.include_tasks: _api_poll_task.yml
+          vars:
+            _api_poll_url: "{{ _api_response.location }}"
+            _api_poll_retries: "{{ di_decommission_poll_retries | default(30) }}"
+            _api_poll_delay: "{{ di_decommission_poll_delay | default(10) }}"
+          when: _api_response.location | default('') | length > 0
 
 # Stop services (host-mode and container-mode only — k8s pods are already
 # gone via kubernetes_decommission.yml, and there are no host services to stop).

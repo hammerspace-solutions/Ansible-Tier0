@@ -193,8 +193,15 @@ ansible-playbook decommission_di.yml -i inventory.yml --limit mover101          
 ```
 
 The playbook evacuates the node's volumes (`di_decommission_evacuate_data`),
-deletes them from Hammerspace, removes the node, and stops the pd-di service
+waits for each evacuation to finish, deletes the volumes from Hammerspace,
+confirms each one is gone, then removes the node and stops the pd-di service
 (`di_decommission_stop_services`).
+
+If Hammerspace rejects any step, the run stops there and the node stays
+registered, so a volume is never deleted before its data has left it.
+
+`--check` sends nothing to Hammerspace. It looks up the node's volumes and
+reports what it would decommission and remove.
 
 ---
 

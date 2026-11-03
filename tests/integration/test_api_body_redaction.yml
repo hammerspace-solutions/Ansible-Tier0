@@ -92,10 +92,13 @@
         quiet: true
 
     # recurse: the role has task files under cluster/ and s3/ too, and a new
-    # body-print site added there must not escape the audit.
+    # body-print site added there must not escape the audit. roles/di prints
+    # API bodies from its decommission failures, so it is audited as well.
     - name: Find the role's task files
       ansible.builtin.find:
-        paths: "{{ _tasks_dir }}"
+        paths:
+          - "{{ _tasks_dir }}"
+          - "{{ playbook_dir }}/../../roles/di/tasks"
         patterns: "*.yml"
         recurse: true
       register: _files
