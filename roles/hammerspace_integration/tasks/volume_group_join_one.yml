@@ -1,5 +1,7 @@
 ---
-# Append this run's volumes to ONE already-existing volume group.
+# Append this run's volumes to ONE already-existing volume group — or, when
+# hammerspace_create_volume_groups is true and the group does not exist,
+# create it with this run's volumes as its members (see below).
 #
 # Called only from volume_group_join.yml, once per distinct group, with:
 #   _vgj.group   - the volume group name
@@ -32,6 +34,7 @@
     _vg_put_raw: {}
     _vg_verify_raw: {}
     _vg_final_names: []
+    _vg_would_create: false
 
 - name: "Wait for task queue before updating volume group {{ _vgj.group }}"
   ansible.builtin.include_tasks: task_queue_wait.yml
@@ -55,22 +58,73 @@
     _vg_status: "{{ (_vg_get_raw.stdout_lines | default(['0']))[-1] | default('0') | int }}"
     _vg_json: "{{ ((_vg_get_raw.stdout_lines | default(['{}']))[:-1] | join('\n') | trim | default('{}', true)) | from_json }}"
 
+# OPT-IN CREATION (hammerspace_create_volume_groups: true)
+# -------------------------------------------------------
+# Off by default, and the 404 below stays a hard failure when it is off: a
+# group made here carries only the auto-created objectives, not whatever
+# policy an operator would have set up in the UI.
+#
+# When on (per-job groups from a Slurm prolog), the group is created WITH this
+# run's volumes. The volumes exist by now (add_volume.yml verified each), so
+# there is no empty group and no name pattern to get wrong. The join below
+# then finds every volume already a member and writes nothing.
+#
+# Only a 404 creates. Any other status is not "missing" — that falls through
+# to the failure below with the status it got.
+- name: "Create volume group {{ _vgj.group }} with this run's volumes"
+  ansible.builtin.include_tasks: volume_group_create.yml
+  vars:
+    volume_group_config:
+      name: "{{ _vgj.group }}"
+      volumes: "{{ _vgj.volumes }}"
+  when:
+    - (_vg_status | int) == 404
+    - hammerspace_create_volume_groups | default(false) | bool
+
+- name: "Use the volume group {{ _vgj.group }} just created"
+  ansible.builtin.set_fact:
+    _vg_status: "{{ _vgc_status }}"
+    _vg_json: "{{ _vgc_json }}"
+    _hs_vg_created_groups: "{{ (_hs_vg_created_groups | default([])) + [_vgj.group] }}"
+  when:
+    - (_vg_status | int) == 404
+    - hammerspace_create_volume_groups | default(false) | bool
+    - _vgc_created | default(false) | bool
+
+# --check sends no POST, so the group is still missing. Report the plan
+# instead of failing on a 404 the real run would not hit.
+- name: "Note that {{ _vgj.group }} would be created (check mode)"
+  ansible.builtin.set_fact:
+    _vg_would_create: true
+  when:
+    - ansible_check_mode
+    - (_vg_status | int) == 404
+    - hammerspace_create_volume_groups | default(false) | bool
+
 # Deliberately a hard failure. The group carries the placement
 # objectives; if it is missing, the volumes are deployed but orphaned,
 # and a silent skip would hide that until someone audits objectives.
 - name: Fail if the configured volume group does not exist
   ansible.builtin.fail:
     msg: |
+      {% if (_vg_status | int) == 404 %}
       Volume group '{{ _vgj.group }}' does not exist
       (HTTP {{ _vg_status }}).
 
-      hammerspace_volume_group names a group that must ALREADY exist —
-      this playbook never creates it, because creating one without the
-      intended placement objectives would silently give the volumes the
-      wrong policy.
+      hammerspace_volume_group names a group that must ALREADY exist
+      unless hammerspace_create_volume_groups is true. It is off here, so
+      nothing was created: a group made by the playbook carries only the
+      auto-created objectives, not the placement policy an operator sets
+      up in the UI.
+      {% else %}
+      Volume group '{{ _vgj.group }}' could not be read
+      (HTTP {{ _vg_status }}), so it is unknown whether it exists and
+      nothing was created. Check the API host, credentials and the Anvil.
+      {% endif %}
 
-      Either create it first (UI, or hammerspace_create_volume_groups
-      with hammerspace_volume_groups), or clear hammerspace_volume_group
+      Either create it first in the UI, or set
+      hammerspace_create_volume_groups: true to have this run create it
+      with its own volumes as members, or clear hammerspace_volume_group
       to skip group membership entirely.
 
       This group was named by: {{ _vgj.hosts | default([]) | join(', ') | default('(play default)', true) }}
@@ -78,7 +132,9 @@
       Existing groups:
         curl -sk -u '{{ hammerspace_api_user }}:<password>' \
           '{{ hs_api_url }}/volume-groups' | jq -r '.[].name'
-  when: _vg_status | int != 200
+  when:
+    - _vg_status | int != 200
+    - not _vg_would_create
 
 # Every other PUT in this role targets .../uoid.uuid (az_map,
 # create_share, dns_update, ad_join, set_location, create_s3_user).
@@ -99,7 +155,9 @@
       Inspect the object:
         curl -sk -u '{{ hammerspace_api_user }}:<password>' \
           '{{ hs_api_url }}/volume-groups/{{ _vgj.group | urlencode }}' | jq .
-  when: _vg_uuid | length == 0
+  when:
+    - _vg_uuid | length == 0
+    - not _vg_would_create
 
 # `selectattr('storageVolume.name', 'defined')` is load-bearing.
 #

@@ -281,14 +281,19 @@
 # Volume Groups (Optional - before volumes)
 # =============================================================================
 
+# run_once: the list is cluster-wide, and a per-host include had every host
+# GET (404), then POST the same group. `| bool`: `-e
+# hammerspace_create_volume_groups=false` passes the STRING "false", which is
+# truthy without it.
 - name: Create volume groups
   ansible.builtin.include_tasks: volume_group_create.yml
   loop: "{{ hammerspace_volume_groups | default([]) }}"
   loop_control:
     loop_var: volume_group_config
     label: "{{ volume_group_config.name }}"
+  run_once: true
   when:
-    - hammerspace_create_volume_groups | default(false)
+    - hammerspace_create_volume_groups | default(false) | bool
     - hammerspace_volume_groups is defined
     - hammerspace_volume_groups | length > 0
 
@@ -392,7 +397,7 @@
       Features Enabled:
         - Task Queue Throttling: {{ hammerspace_task_queue_throttle | default(true) }}
         - AZ Mapping: {{ hammerspace_enable_az_mapping | default(false) }}
-        - Volume Groups: {{ hammerspace_create_volume_groups | default(false) }}
+        - Volume Groups: {{ hammerspace_create_volume_groups | default(false) | bool }}
         - Share Objectives: {{ hammerspace_apply_share_objectives | default(false) }}
         - S3 Nodes: {{ hammerspace_add_s3_nodes | default(false) }}
         - Prometheus: {{ hammerspace_enable_prometheus | default(false) }}

@@ -111,6 +111,17 @@
               - checkpoints
       when: _t0po_shares | length == 0
 
+    # Hammerspace creates place-on-<group> when the group is created, but not
+    # necessarily by the time the create call returns. For a group created
+    # earlier in THIS run (hammerspace_create_volume_groups), the lookup is
+    # retried; for any other group a miss is a misconfiguration and fails
+    # on the first answer, as before.
+    - name: Decide whether to wait for the objective
+      ansible.builtin.set_fact:
+        _t0po_wait: >-
+          {{ (hammerspace_volume_group | default('') | trim) in (_hs_vg_created_groups | default([]))
+             and (hammerspace_tier0_place_on_objective | default('')) | length == 0 }}
+
     - name: "Look up objective {{ _t0po_objective }}"
       ansible.builtin.shell:
         cmd: >-
@@ -123,6 +134,11 @@
       failed_when: false
       check_mode: false
       no_log: true
+      until: >-
+        (not (_t0po_wait | bool))
+        or (((_t0po_obj_raw.stdout_lines | default(['0']))[-1] | default('0') | int) == 200)
+      retries: "{{ (hammerspace_tier0_objective_wait_retries | default(12)) if (_t0po_wait | bool) else 1 }}"
+      delay: "{{ (hammerspace_tier0_objective_wait_delay | default(5)) if (_t0po_wait | bool) else 0 }}"
 
     - name: Parse the objective lookup
       ansible.builtin.set_fact:
@@ -136,7 +152,10 @@
     - name: "Fail if objective {{ _t0po_objective }} does not exist"
       ansible.builtin.fail:
         msg: |
-          Objective '{{ _t0po_objective }}' was not found (HTTP {{ _t0po_obj_status }}).
+          Objective '{{ _t0po_objective }}' was not found (HTTP {{ _t0po_obj_status }}){{
+            (' after waiting ' ~ ((hammerspace_tier0_objective_wait_retries | default(12) | int)
+              * (hammerspace_tier0_objective_wait_delay | default(5) | int)) ~ 's for the group created in this run')
+            if (_t0po_wait | bool) else '' }}.
 
           Hammerspace creates place-on-<group> automatically when a volume
           group is created, so for group '{{ hammerspace_volume_group | default('') }}'

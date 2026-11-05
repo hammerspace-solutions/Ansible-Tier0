@@ -640,8 +640,9 @@ hammerspace_gpu_fabric_az_update_file: true
 #   hammerspace_volume_group: "tier0-nvme"
 #
 # Guarantees:
-#   - the group is NEVER created here. If it does not exist the run FAILS,
-#     rather than silently deploying volumes that never pick up its objectives.
+#   - the group is NOT created unless hammerspace_create_volume_groups is
+#     true. With it off, a missing group FAILS the run rather than silently
+#     deploying volumes that never pick up its objectives.
 #   - volumes already in the group are preserved untouched — the update is
 #     append-only (GET, append, single PUT), and membership is re-read
 #     afterwards to confirm nothing was lost.
@@ -671,6 +672,16 @@ hammerspace_gpu_fabric_az_update_file: true
 # Leave empty to skip volume group membership entirely.
 hammerspace_volume_group: ""
 
+# Let the playbook create volume groups. With this true, a
+# hammerspace_volume_group that does not exist is created with this run's
+# volumes as its members — e.g. one group per Slurm job:
+#
+#   -e hammerspace_volume_group=tier0-${SLURM_JOB_ID}
+#   -e hammerspace_create_volume_groups=true
+#
+# The group gets only the objectives Hammerspace creates automatically
+# (place-on-<group>, confine-to-<group>, exclude-from-<group>). Nothing
+# removes it afterwards. Also creates each group in hammerspace_volume_groups.
 hammerspace_create_volume_groups: false
 # hammerspace_volume_groups:
 #   - name: "tier0-az1-volumes"

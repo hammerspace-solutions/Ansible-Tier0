@@ -171,16 +171,20 @@
               the last PUT wins and discards volumes added by other hosts in
               the same run.
 
-        - name: 'TEST 3 ASSERT: the group is never created, and 404 is fatal'
+        # Creation is opt-in (hammerspace_create_volume_groups) and lives in
+        # volume_group_create.yml; its gate is pinned by
+        # test_volume_group_create.yml TEST 7. The join files themselves
+        # still never POST, and with the flag off a 404 is still fatal.
+        - name: 'TEST 3 ASSERT: the join never POSTs, and 404 is fatal unless creation is opted in'
           ansible.builtin.assert:
             that:
-              # No POST/create anywhere in this file.
               - "'-X POST' not in _vgj"
               - "'ansible.builtin.fail' in _vgj"
               - "'does not exist' in _vgj"
             fail_msg: |
-              REGRESSION: a missing volume group must be a HARD FAILURE, and the
-              group must never be created here. Creating it without the intended
+              REGRESSION: a missing volume group must be a HARD FAILURE unless
+              hammerspace_create_volume_groups is true, and the join files must
+              not create it themselves. Creating it without the intended
               placement objectives silently gives every volume the wrong policy;
               skipping silently leaves the volumes orphaned.
 
@@ -220,7 +224,7 @@
 
         - name: Record TEST 3 pass
           ansible.builtin.set_fact:
-            _test_passes: "{{ _test_passes + ['TEST 3: audit — run_once union write, never creates the group, 404 fatal, membership verified, opt-in'] }}"
+            _test_passes: "{{ _test_passes + ['TEST 3: audit — run_once union write, never POSTs, 404 fatal unless opted in, membership verified, opt-in'] }}"
       rescue:
         - name: Record TEST 3 failure
           ansible.builtin.set_fact:

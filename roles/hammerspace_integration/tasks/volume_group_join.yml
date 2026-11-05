@@ -8,8 +8,11 @@
 # to the group THAT host names. See "PER-HOST GROUPS" below.
 #
 # CONTRACT — this task file will NOT:
-#   - create a volume group (it must already exist; a 404 is a hard failure,
-#     not a silent skip, or the volumes would never pick up its objectives)
+#   - create a volume group, unless hammerspace_create_volume_groups is true
+#     (then a MISSING group is created with this run's volumes as members;
+#     an existing one is never modified beyond the append). With the flag
+#     off a 404 is a hard failure, not a silent skip, or the volumes would
+#     never pick up its objectives.
 #   - remove, reorder or rewrite any volume already in a group
 #   - re-add a volume that is already a member
 # It appends only, and only the volumes this run created.
@@ -59,6 +62,7 @@
   ansible.builtin.set_fact:
     _vg_pairs: []
     _vg_plan: []
+    _hs_vg_created_groups: []
   run_once: true
 
 # add_volume.yml records the exact name it used on each host; hostvars is how

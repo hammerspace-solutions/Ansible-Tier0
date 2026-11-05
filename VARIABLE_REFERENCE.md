@@ -19,7 +19,7 @@ also be passed on the command line with `-e name=value`.
 | `client_subnets` | The subnets your NFS clients are on | Ships as `0.0.0.0/0`; narrow it before production. |
 | `hammerspace_nodes` | Extra Anvil / DSX IPs, if any | The Anvil is included already. Listed IPs get `no_root_squash`. |
 | `storage_type` | `nvme` (default), or `scsi` for `/dev/sd*` disks | Which drives are discovered. |
-| `hammerspace_volume_group` | The name of your Tier 0 volume group | Volumes are added to it on every run. Must exist already. May be set per host or per inventory group (e.g. `group_vars/AZ1`), or per run with `-e`; each host's volumes go to the group that host names, one write per distinct group. |
+| `hammerspace_volume_group` | The name of your Tier 0 volume group | Volumes are added to it on every run. Must exist already, unless `hammerspace_create_volume_groups: true` (then a missing group is created with this run's volumes). May be set per host or per inventory group (e.g. `group_vars/AZ1`), or per run with `-e`; each host's volumes go to the group that host names, one write per distinct group. |
 | `hammerspace_tier0_place_on_group` | `true` | Applies the group's placement objective to your shares so new files land on Tier 0 first. |
 | `hammerspace_volume_az_prefix_enabled` | `true` on multi-zone deployments | Puts `AZ1:` etc. on volume names. |
 | `hammerspace_api_validate_certs` | `true` once the Anvil has a trusted certificate | Off by default for self-signed certificates. |
@@ -210,8 +210,9 @@ prefix and `instance_report.csv`, so the three always agree.
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `hammerspace_create_volume_groups` | `false` | Create volume groups for organizing volumes. |
-| `hammerspace_volume_groups` | *(undefined)* | List of groups with `name` and `location_pattern`. |
+| `hammerspace_create_volume_groups` | `false` | Allow the playbook to create volume groups. When `true`: a `hammerspace_volume_group` that does not exist is created with this run's volumes as members (e.g. one group per Slurm job), and every group in `hammerspace_volume_groups` is created if missing. An existing group is never modified beyond the normal append. A created group is only reported once the cluster lists it. A group created this way carries only the objectives Hammerspace creates automatically (`place-on-<group>` etc.). |
+| `hammerspace_volume_groups` | *(undefined)* | List of groups to create, each with `name` and either `volumes` (list of storage volume names) or `location_pattern`. Requires `hammerspace_create_volume_groups: true`. |
+| `hammerspace_volume_group_create_wait_retries` / `_delay` | `12` / `5` | How long to wait for a newly created group to be listed before failing. |
 | `hammerspace_volume_group_members` | *(undefined)* | List of `volume_name` + `group_name` pairs. |
 
 ## Shares
@@ -231,6 +232,7 @@ prefix and `instance_report.csv`, so the three always agree.
 | `hammerspace_share_objectives` | *(undefined)* | List with `share_name`, `objective`, `applicability`. |
 | `hammerspace_tier0_place_on_group` | `false` | Apply the volume group's auto-created `place-on-<hammerspace_volume_group>` objective to each share in `hammerspace_shares`, so first instances land on Tier 0 instead of being spread across every volume (DSX-backed included). Requires `hammerspace_volume_group`. Missing objective/share/group is a hard failure, and so is a run naming more than one group (a share objective names one — set `hammerspace_tier0_place_on_objective`, use a group containing them all, or run one AZ at a time). Selects the tier, not the node. |
 | `hammerspace_tier0_place_on_objective` | `place-on-<hammerspace_volume_group>` | Override the objective name if the group's objective was renamed. |
+| `hammerspace_tier0_objective_wait_retries` / `_delay` | `12` / `5` | For a group created in the same run, how long to wait for its `place-on-<group>` objective to appear. A group that already existed is not waited on. |
 | `hammerspace_tier0_place_on_shares` | names in `hammerspace_shares` | Shares to apply it to; set to target shares created outside this playbook. |
 | `hammerspace_tier0_place_on_applicability` | `TRUE` | Objective applicability expression, e.g. `LAST_USE_AGE<1*HOURS?TRUE`. |
 

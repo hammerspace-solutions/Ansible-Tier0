@@ -513,7 +513,7 @@ entirely when that host named none.
 |---|----------|----------|
 | 1 | Group holds 2 volumes; run creates 2, one already a member | Append-only — both pre-existing kept, 1 added, no duplicates |
 | 2 | Re-run with everything already a member | Zero additions, no PUT issued |
-| 3 | **Audit** orchestrator + per-group body | `run_once` union write over `ansible_play_hosts`; the per-group body never re-reads the play var; never creates a group; 404 fatal; membership re-read; opt-in gate on the include considers every host |
+| 3 | **Audit** orchestrator + per-group body | `run_once` union write over `ansible_play_hosts`; the per-group body never re-reads the play var; the join files never POST; 404 fatal unless `hammerspace_create_volume_groups` (gate pinned in `test_volume_group_create.yml`); membership re-read; opt-in gate on the include considers every host |
 | 4 | **Audit** `add_volume.yml` | Records the exact volume name it used — never re-derived for grouping |
 | 5 | 4 hosts, 2 AZs, a group each | One plan entry per group, volumes unioned per group, nothing crosses over; the old single-scalar read is shown sending all 4 to one group |
 | 6 | One group / empty per-host value / no group named | Unchanged single union write; empty value falls back to the play value; nothing produces a group named `''` |
@@ -523,6 +523,36 @@ Mutation-tested: dropping the plan reset, re-reading the play var in the
 per-group body, dropping the per-group fact reset, accepting an empty group
 name, softening the ambiguity guard, or narrowing the include gate back to the
 current host each fails the relevant test.
+
+## `test_volume_group_create.yml`
+
+`hammerspace_create_volume_groups` used to act only on the
+`hammerspace_volume_groups` list, so `-e hammerspace_volume_group=<new>
+-e hammerspace_create_volume_groups=true` created nothing and the join failed
+with HTTP 404. A missing `hammerspace_volume_group` is now created, with
+this run's volumes, when the flag is on. The old create file also never read
+its POST status and printed "created successfully" regardless.
+
+TESTs 1–5 run the real task files against `mock_anvil_volume_groups.py`, a
+throwaway local HTTP server. The mock proves the gating; it does not prove a
+real Anvil accepts the POST body.
+
+| # | Scenario | Expected |
+|---|----------|----------|
+| 1 | POST 202 + Location, task COMPLETED, group listed | `_vgc_created`, status 200, uuid, members = this run's volumes in the shape the join reads |
+| 2 | POST 400 whose body echoes `authorization` as a JSON object | Hard failure naming HTTP 400; `Basic <redacted>`; neither the password nor its base64 in the message |
+| 3 | POST 202, group never listed | Hard failure "still not listed" — not "created" |
+| 4 | Join, flag `"true"` (string, as `-e` passes it), group missing | Group created, recorded for the place-on wait, join adds nothing |
+| 5 | Join, flag `"false"` (string), group missing | Still the hard "does not exist" failure — `"false"` is truthy without `\| bool` |
+| 6 | **Audit** `volume_group_create.yml` | 4 curl tasks, all `no_log`; no fixed `/tmp` header path; `-d @file`; POST and lookup status gates; listing check; block gate decided once; temp files removed before the rejection failure |
+| 7 | **Audit** the join gate | Create only on 404 AND flag `\| bool`; no POST in the join file; check mode suppresses both failures; `main.yml` reads the flag with `\| bool` |
+| 8 | Place-on wait decision, verbatim | Waits only for a group created in this run with no explicit objective; source holds exactly that expression |
+| 9 | Exhausted `until` + `failed_when: false` + `no_log` | Play continues — the waits rely on this so their failures are reported uncensored (checked on ansible-core 2.14 and 2.20) |
+
+Mutation-tested (9): gating the block on the fact it changes, dropping the
+POST status gate, the POST `no_log`, the `\| bool` in the join or `main.yml`,
+a check-mode guard, the listing verification, the body redaction, or forcing
+the place-on wait each fails the relevant test.
 
 ## `test_api_body_redaction.yml`
 
@@ -798,6 +828,10 @@ scalar for that, or `regex_findall(..., multiline=True)`.
   poll, or the post-add verification — the name this file records in
   `_hs_run_volume_names` is what the volume group join PUTs, and a name the
   API cannot resolve fails far away on another host
+- After any change to `roles/hammerspace_integration/tasks/volume_group_create.yml`,
+  the create gate in `volume_group_join_one.yml`, or the objective wait in
+  `tier0_place_on_group.yml` (`test_volume_group_create.yml` — needs
+  `python3` for the mock Anvil)
 - After any change to `roles/di/tasks/decommission_volume.yml`,
   `roles/di/tasks/decommission.yml`, or any new POST/PUT/DELETE through
   `roles/di/tasks/_api_request.yml` — that helper ignores `--check`, so every

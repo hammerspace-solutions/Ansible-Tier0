@@ -166,6 +166,32 @@ Volume group join plan (2 group(s)):
   tier0-az2 <- 2 volume(s) from node201, node202
 ```
 
+### Creating the group in the same run
+
+By default the group must already exist. To have the playbook create it, set
+`hammerspace_create_volume_groups: true`. A group that does not exist is then
+created with this run's volumes as its members — useful for one group per
+job, set from a scheduler prolog:
+
+```bash
+ansible-playbook site.yml -i inventory.azure_rm.yml --limit "$NODE_IP" \
+  -e hammerspace_volume_group="tier0-${SLURM_JOB_ID}" \
+  -e hammerspace_create_volume_groups=true \
+  -e hammerspace_tier0_place_on_group=true
+```
+
+- The run reports the group as created only once the cluster lists it. A
+  rejected request stops the run with the API's response.
+- A group that already exists is used as-is, so re-running is safe.
+- A new group carries only the objectives Hammerspace creates for every group
+  (`place-on-<group>`, `confine-to-<group>`, `exclude-from-<group>`). With
+  `hammerspace_tier0_place_on_group: true` the run waits briefly for
+  `place-on-<group>` to appear before applying it to the shares.
+- Nothing removes the group or its objective from the shares afterwards.
+  Plan for that when creating one group per job: share objectives are
+  cluster-wide, so concurrent jobs each add their own `place-on-<group>` to
+  the same shares.
+
 You can also create simple groups by name pattern, or add specific volumes:
 
 ```yaml
